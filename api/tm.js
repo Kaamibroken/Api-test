@@ -6,7 +6,7 @@ const querystring = require("querystring");
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "http://www.timesms.net",  // NO trailing slash!
+  baseUrl: "http://www.timesms.net",
   username: "Kami526",
   password: "Kami526",
   userAgent: "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
@@ -15,7 +15,7 @@ const CONFIG = {
 let cookies = [];
 let isLoggedIn = false;
 
-/* ================= SAFE JSON ================= */
+/* SAFE JSON */
 function safeJSON(text) {
   try {
     return JSON.parse(text);
@@ -24,31 +24,23 @@ function safeJSON(text) {
   }
 }
 
-/* ================= REQUEST ================= */
+/* REQUEST */
 function makeRequest(method, path, data = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
-    // Normalize path: always start with /
-    let cleanPath = path.trim();
-    if (!cleanPath.startsWith('/')) cleanPath = '/' + cleanPath;
-
+    let cleanPath = path.startsWith('/') ? path : '/' + path;
     const fullUrl = CONFIG.baseUrl + cleanPath;
 
-    // Guard against common mistakes (double domain, invalid chars)
     if (fullUrl.includes('http:') && fullUrl.indexOf('http:') !== fullUrl.lastIndexOf('http:')) {
-      console.error("[URL ERROR] Double protocol/domain detected:", fullUrl);
       return reject(new Error("Invalid URL - double domain"));
     }
-    if (!fullUrl.startsWith('http://www.timesms.net')) {
-      console.error("[URL ERROR] Bad base:", fullUrl);
-      return reject(new Error("Invalid URL - wrong base"));
-    }
 
-    console.log(`[DEBUG REQUEST] ${method} ${fullUrl}`);  // <--- This shows exactly what is sent
+    console.log(`[DEBUG] ${method} ${fullUrl}`);
 
     const headers = {
       "User-Agent": CONFIG.userAgent,
-      "Accept": "*/*",
+      "Accept": "application/json, text/javascript, */*; q=0.01",
       "Accept-Encoding": "gzip, deflate",
+      "Accept-Language": "en-PK,en;q=0.9",
       "Cookie": cookies.join("; "),
       ...extraHeaders
     };
@@ -57,7 +49,6 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
       headers["Content-Length"] = Buffer.byteLength(data);
       headers["Origin"] = CONFIG.baseUrl;
-      headers["Referer"] = `${CONFIG.baseUrl}/login`;
     }
 
     const req = http.request(fullUrl, { method, headers }, res => {
@@ -73,26 +64,20 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
 
       res.on("end", () => {
         let buffer = Buffer.concat(chunks);
-        try {
-          if (res.headers["content-encoding"] === "gzip") {
-            buffer = zlib.gunzipSync(buffer);
-          }
-        } catch {}
+        if (res.headers["content-encoding"] === "gzip") {
+          try { buffer = zlib.gunzipSync(buffer); } catch {}
+        }
         resolve(buffer.toString());
       });
     });
 
-    req.on("error", err => {
-      console.error("[REQUEST FAIL]", err.message, fullUrl);
-      reject(err);
-    });
-
+    req.on("error", reject);
     if (data) req.write(data);
     req.end();
   });
 }
 
-/* ================= LOGIN ================= */
+/* LOGIN */
 async function login() {
   cookies = [];
   isLoggedIn = false;
@@ -108,9 +93,10 @@ async function login() {
     capt
   });
 
-  await makeRequest("POST", "/signin", form);
+  await makeRequest("POST", "/signin", form, {
+    Referer: `${CONFIG.baseUrl}/login`
+  });
 
-  // Quick check
   const test = await makeRequest("GET", "/agent/");
   if (test.includes("Please sign in") || test.includes("login")) {
     throw new Error("Login failed");
@@ -119,71 +105,43 @@ async function login() {
   isLoggedIn = true;
 }
 
-/* ================= ENSURE LOGIN + AUTO RELOGIN ================= */
-async function ensureLogin() {
-  if (isLoggedIn) return;
-
-  try {
-    await login();
-  } catch (e) {
-    console.error("[LOGIN ERROR]", e.message);
-    throw e;
-  }
-}
-
-function isLoggedOutResponse(body) {
-  return body.includes("Please sign in") ||
-         body.includes("login") ||
-         body.includes("Direct Script Access") ||
-         body.includes("Invalid");
-}
-
-/* ================= FIX NUMBERS ================= */
+/* FIX NUMBERS & SMS same as before */
 function fixNumbers(data) {
   if (!data.aaData) return data;
-
   data.aaData = data.aaData.map(row => [
-    row[1],
+    row[1] || "",
     "",
-    row[3],
+    row[3] || "",
     "Weekly",
     (row[4] || "").replace(/<[^>]+>/g, "").trim(),
     (row[7] || "").replace(/<[^>]+>/g, "").trim()
   ]);
-
   return data;
 }
 
-/* ================= FIX SMS ================= */
 function fixSMS(data) {
   if (!data.aaData) return data;
-
   data.aaData = data.aaData
     .map(row => {
-      let message = (row[5] || "")
-        .replace(/legendhacker/gi, "")
-        .trim();
-
+      let message = (row[5] || "").replace(/legendhacker/gi, "").trim();
       if (!message) return null;
-
       return [
-        row[0],
-        row[1],
-        row[2],
-        row[3],
+        row[0] || "",
+        row[1] || "",
+        row[2] || "",
+        row[3] || "",
         message,
         "$",
         row[7] || 0
       ];
     })
     .filter(Boolean);
-
   return data;
 }
 
-/* ================= FETCH NUMBERS ================= */
+/* GET NUMBERS (unchanged, working) */
 async function getNumbers() {
-  await ensureLogin();
+  if (!isLoggedIn) await login();
 
   const params = querystring.stringify({
     frange: "",
@@ -198,24 +156,26 @@ async function getNumbers() {
     "X-Requested-With": "XMLHttpRequest"
   });
 
-  if (isLoggedOutResponse(data)) {
-    isLoggedIn = false;
-    await ensureLogin();
-    data = await makeRequest("GET", `/agent/res/data_smsnumbers.php?${params}`, null, {
-      Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
-      "X-Requested-With": "XMLHttpRequest"
-    });
-  }
-
   return fixNumbers(safeJSON(data));
 }
 
-/* ================= FETCH SMS ================= */
+/* GET SMS - FIXED VERSION */
 async function getSMS() {
-  await ensureLogin();
+  await login();  // Fresh login har baar (important for this endpoint)
 
+  // Load the parent stats page first - this sets session/context
+  await makeRequest("GET", "/agent/SMSCDRStats", null, {
+    Referer: `${CONFIG.baseUrl}/agent/`,
+    "Upgrade-Insecure-Requests": "1"
+  });
+
+  // PKT timezone adjust
   const today = new Date();
+  const pktOffset = 5 * 60; // +5 hours
+  today.setMinutes(today.getMinutes() + today.getTimezoneOffset() + pktOffset);
   const d = `\( {today.getFullYear()}- \){String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+  console.log("[SMS DATE USED]", d);
 
   const params = querystring.stringify({
     fdate1: `${d} 00:00:00`,
@@ -224,44 +184,56 @@ async function getSMS() {
     fclient: "",
     fnum: "",
     fcli: "",
+    fgdate: "",
+    fgmonth: "",
+    fgrange: "",
+    fgclient: "",
+    fgnumber: "",
+    fgcli: "",
     fg: "0",
-    iDisplayLength: "-1"
+    sEcho: "2",
+    iColumns: "9",
+    iDisplayStart: "0",
+    iDisplayLength: "5000",  // safer
+    iSortCol_0: "0",
+    sSortDir_0: "desc"
   });
 
   let data = await makeRequest("GET", `/agent/res/data_smscdr.php?${params}`, null, {
-    Referer: `${CONFIG.baseUrl}/agent/SMSCDRStats`,
-    "X-Requested-With": "XMLHttpRequest"
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRStats`,  // exact match from your log
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/javascript, */*; q=0.01"
   });
 
-  if (isLoggedOutResponse(data)) {
-    isLoggedIn = false;
-    await ensureLogin();
+  console.log("[SMS RESPONSE START]", data.substring(0, 500)); // debug
+
+  if (data.includes("Direct Script Access") || data.includes("Please sign in")) {
+    console.log("[RETRY]");
+    await login();
+    await makeRequest("GET", "/agent/SMSCDRStats");
     data = await makeRequest("GET", `/agent/res/data_smscdr.php?${params}`, null, {
       Referer: `${CONFIG.baseUrl}/agent/SMSCDRStats`,
       "X-Requested-With": "XMLHttpRequest"
     });
   }
 
-  return fixSMS(safeJSON(data));
+  const json = safeJSON(data);
+  return fixSMS(json);
 }
 
-/* ================= ROUTE ================= */
+/* ROUTE */
 router.get("/", async (req, res) => {
   const { type } = req.query;
 
-  if (!type) {
-    return res.json({ error: "Use ?type=numbers or ?type=sms" });
-  }
+  if (!type) return res.json({ error: "Use ?type=numbers or ?type=sms" });
 
   try {
     if (type === "numbers") return res.json(await getNumbers());
     if (type === "sms") return res.json(await getSMS());
-
     res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error("[ERROR]", err.message);
-    isLoggedIn = false;
-    res.json({ error: err.message || "Request failed" });
+    console.error(err);
+    res.json({ error: err.message || "Failed" });
   }
 });
 
