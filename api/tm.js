@@ -20,7 +20,7 @@ function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: "Invalid JSON from server" };
+    return { error: "Invalid JSON from server", raw: text.substring(0, 300) };
   }
 }
 
@@ -34,7 +34,7 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
       return reject(new Error("Invalid URL - double domain"));
     }
 
-    console.log(`[DEBUG] ${method} ${fullUrl}`);
+    console.log(`[REQ] ${method} ${fullUrl}`);
 
     const headers = {
       "User-Agent": CONFIG.userAgent,
@@ -103,6 +103,7 @@ async function login() {
   }
 
   isLoggedIn = true;
+  console.log("[LOGIN] Success");
 }
 
 /* FIX NUMBERS & SMS */
@@ -159,21 +160,25 @@ async function getNumbers() {
   return fixNumbers(safeJSON(data));
 }
 
-/* GET SMS - USING YOUR EXACT LONG URL PATTERN */
+/* GET SMS - FINAL VERSION WITH YOUR EXACT LONG PATTERN */
 async function getSMS() {
   await login();  // Fresh login
 
-  // PKT date (UTC+5)
+  // PKT date range: yesterday + today (to catch new messages)
   const now = new Date();
-  const pktTime = new Date(now.getTime() + (5 * 60 * 60 * 1000));
-  const d = `\( {pktTime.getFullYear()}- \){String(pktTime.getMonth() + 1).padStart(2, "0")}-${String(pktTime.getDate()).padStart(2, "0")}`;
+  const pktNow = new Date(now.getTime() + (5 * 60 * 60 * 1000)); // +5 hours PKT
+  const today = `\( {pktNow.getFullYear()}- \){String(pktNow.getMonth() + 1).padStart(2, "0")}-${String(pktNow.getDate()).padStart(2, "0")}`;
 
-  console.log("[SMS] Using date:", d);
+  const yesterdayDate = new Date(pktNow);
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = `\( {yesterdayDate.getFullYear()}- \){String(yesterdayDate.getMonth() + 1).padStart(2, "0")}-${String(yesterdayDate.getDate()).padStart(2, "0")}`;
 
-  // Your exact long parameter string (fixed & encoded properly)
+  console.log("[SMS] Date range:", yesterday, "to", today);
+
+  // Your exact long parameter pattern
   const params = [
-    `fdate1=${encodeURIComponent(d + " 00:00:00")}`,
-    `fdate2=${encodeURIComponent(d + " 23:59:59")}`,
+    `fdate1=${encodeURIComponent(yesterday + " 00:00:00")}`,
+    `fdate2=${encodeURIComponent(today + " 23:59:59")}`,
     `frange=`,
     `fclient=`,
     `fnum=`,
@@ -211,11 +216,10 @@ async function getSMS() {
 
   console.log("[SMS] Full URL:", CONFIG.baseUrl + urlPath);
 
-  // Load parent page first
+  // Load parent page (important for session/context)
   try {
     await makeRequest("GET", "/agent/SMSCDRReports", null, {
-      Referer: `${CONFIG.baseUrl}/agent/`,
-      "Upgrade-Insecure-Requests": "1"
+      Referer: `${CONFIG.baseUrl}/agent/`
     });
     console.log("[SMS] Loaded SMSCDRReports");
   } catch (err) {
@@ -228,10 +232,10 @@ async function getSMS() {
     "Accept": "application/json, text/javascript, */*; q=0.01"
   });
 
-  console.log("[SMS RESPONSE PREVIEW]", data.substring(0, 600));
+  console.log("[SMS RAW PREVIEW]", data.substring(0, 800));
 
-  // Retry if blocked
-  if (data.includes("Direct Script Access") || data.includes("Please sign in")) {
+  // Retry if blocked or login page
+  if (data.includes("Direct Script Access") || data.includes("Please sign in") || data.includes("login")) {
     console.log("[SMS] Blocked - retrying...");
     await login();
     await makeRequest("GET", "/agent/SMSCDRReports");
@@ -239,11 +243,15 @@ async function getSMS() {
       Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
       "X-Requested-With": "XMLHttpRequest"
     });
-    console.log("[SMS RETRY PREVIEW]", data.substring(0, 600));
+    console.log("[SMS RETRY PREVIEW]", data.substring(0, 800));
   }
 
   const json = safeJSON(data);
-  return fixSMS(json);
+  const result = fixSMS(json);
+
+  console.log("[SMS] Final messages count:", result.aaData?.length || 0);
+
+  return result;
 }
 
 /* ROUTE */
@@ -257,7 +265,7 @@ router.get("/", async (req, res) => {
     if (type === "sms") return res.json(await getSMS());
     res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error(err);
+    console.error("[ERROR]", err.message);
     res.json({ error: err.message || "Failed" });
   }
 });
