@@ -7,11 +7,11 @@ const querystring = require("querystring");
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "http://167.114.117.67/ints",
-  username: "ZONEY11",
-  password: "@zoney123",
+  baseUrl: "http://51.77.52.79/ints",
+  username: "Kami526",
+  password: "Kami526",
   userAgent:
-    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/144 Mobile"
+    "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
 };
 
 let cookies = [];
@@ -154,8 +154,8 @@ async function getNumbers() {
 async function getSMS() {
   await login();
 
-  // Wide range taake aaj ke naye SMS bhi aa jaye (tumhare last message se inspired)
-  const startDate = "2026-02-21";
+  // Wide range taake aaj ke naye SMS bhi aa jaye
+  const startDate = "2026-03-02";
   const endDate = "2099-12-31";
 
   const url =
@@ -163,7 +163,7 @@ async function getSMS() {
     `fdate1=${encodeURIComponent(startDate + " 00:00:00")}&` +
     `fdate2=${encodeURIComponent(endDate + " 23:59:59")}&` +
     `frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&` +
-    `sEcho=1&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=5000`;
+    `sEcho=2&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=5000`;
 
   const data = await request("GET", url, null, {
     Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
@@ -191,8 +191,7 @@ router.get("/", async (req, res) => {
 
     res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error("[ERROR]", err.message);
-    res.json({ error: err.message || "Request failed" });
+    res.json({ error: err.message });
   }
 });
 
