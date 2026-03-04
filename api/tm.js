@@ -1,57 +1,52 @@
 const express = require("express");
 const http = require("http");
+const https = require("https");
 const zlib = require("zlib");
 const querystring = require("querystring");
 
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "http://51.89.7.175/sms",
-  username: "Kami526",
-  password: "Kami526",
-  userAgent: "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
+  baseUrl: "http://167.114.117.67/ints",
+  username: "ZONEY11",
+  password: "@zoney123",
+  userAgent:
+    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/144 Mobile"
 };
 
 let cookies = [];
-let isLoggedIn = false;
 
-/* SAFE JSON */
+/* ================= SAFE JSON ================= */
 function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: "Invalid JSON", raw: text.substring(0, 300) };
+    return { error: "Invalid JSON from server" };
   }
 }
 
-/* REQUEST */
-function makeRequest(method, path, data = null, extraHeaders = {}) {
+/* ================= REQUEST ================= */
+function request(method, url, data = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
-    let cleanPath = path.startsWith('/') ? path : '/' + path;
-    const fullUrl = CONFIG.baseUrl + cleanPath;
-
-    console.log(`[REQ] ${method} ${fullUrl}`);
+    const lib = url.startsWith("https") ? https : http;
 
     const headers = {
       "User-Agent": CONFIG.userAgent,
-      "Accept": "*/*",
+      Accept: "*/*",
       "Accept-Encoding": "gzip, deflate",
-      "Accept-Language": "en-PK,en;q=0.9",
-      "Cookie": cookies.join("; "),
+      Cookie: cookies.join("; "),
       ...extraHeaders
     };
 
     if (method === "POST" && data) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
       headers["Content-Length"] = Buffer.byteLength(data);
-      headers["Origin"] = CONFIG.baseUrl;
     }
 
-    const req = http.request(fullUrl, { method, headers }, res => {
+    const req = lib.request(url, { method, headers }, res => {
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
-          const part = c.split(";")[0];
-          if (!cookies.includes(part)) cookies.push(part);
+          cookies.push(c.split(";")[0]);
         });
       }
 
@@ -60,9 +55,11 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
 
       res.on("end", () => {
         let buffer = Buffer.concat(chunks);
-        if (res.headers["content-encoding"] === "gzip") {
-          try { buffer = zlib.gunzipSync(buffer); } catch {}
-        }
+        try {
+          if (res.headers["content-encoding"] === "gzip") {
+            buffer = zlib.gunzipSync(buffer);
+          }
+        } catch {}
         resolve(buffer.toString());
       });
     });
@@ -73,23 +70,14 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
   });
 }
 
-/* LOGIN with AUTO CAPTCHA DETECT */
+/* ================= LOGIN ================= */
 async function login() {
   cookies = [];
-  isLoggedIn = false;
 
-  const loginPage = await makeRequest("GET", "/SignIn");
+  const page = await request("GET", `${CONFIG.baseUrl}/login`);
 
-  // Auto detect CAPTCHA (math question)
-  const captMatch = loginPage.match(/What is (\d+)\s*[\+\-]\s*(\d+)/i) ||
-                    loginPage.match(/(\d+)\s*[\+\-]\s*(\d+)/i);
-  let capt = 10;
-  if (captMatch) {
-    const op = captMatch[0].includes('-') ? -1 : 1;
-    capt = Number(captMatch[1]) + (op * Number(captMatch[2]));
-  }
-
-  console.log("[CAPTCHA AUTO] Detected:", capt);
+  const match = page.match(/What is (\d+) \+ (\d+)/i);
+  const capt = match ? Number(match[1]) + Number(match[2]) : 10;
 
   const form = querystring.stringify({
     username: CONFIG.username,
@@ -97,39 +85,48 @@ async function login() {
     capt
   });
 
-  const loginRes = await makeRequest("POST", "/signmein", form, {
-    Referer: `${CONFIG.baseUrl}/SignIn`
-  });
-
-  if (loginRes.includes("Invalid") || loginRes.includes("captcha") || loginRes.includes("Please")) {
-    throw new Error("Login failed - check credentials or CAPTCHA");
-  }
-
-  // Test protected page
-  const test = await makeRequest("GET", "/client/");
-  if (test.includes("SignIn") || test.includes("login")) {
-    throw new Error("Login not successful");
-  }
-
-  isLoggedIn = true;
-  console.log("[LOGIN] Success");
+  await request(
+    "POST",
+    `${CONFIG.baseUrl}/signin`,
+    form,
+    { Referer: `${CONFIG.baseUrl}/login` }
+  );
 }
 
-/* FIX SMS (same as before) */
+/* ================= FIX NUMBERS ================= */
+function fixNumbers(data) {
+  if (!data.aaData) return data;
+
+  data.aaData = data.aaData.map(row => [
+    row[1],
+    "",
+    row[3],
+    "Weekly",
+    (row[4] || "").replace(/<[^>]+>/g, "").trim(),
+    (row[7] || "").replace(/<[^>]+>/g, "").trim()
+  ]);
+
+  return data;
+}
+
+/* ================= FIX SMS ================= */
 function fixSMS(data) {
   if (!data.aaData) return data;
 
   data.aaData = data.aaData
     .map(row => {
-      let message = (row[5] || "").replace(/legendhacker/gi, "").trim();
+      let message = (row[5] || "")
+        .replace(/legendhacker/gi, "")
+        .trim();
+
       if (!message) return null;
 
       return [
-        row[0] || "", // date/time
-        row[1] || "",
-        row[2] || "",
-        row[3] || "",
-        message,
+        row[0], // date
+        row[1], // range
+        row[2], // number
+        row[3], // service
+        message, // OTP MESSAGE
         "$",
         row[7] || 0
       ];
@@ -139,95 +136,63 @@ function fixSMS(data) {
   return data;
 }
 
-/* GET SMS - Wide range + your pattern */
+/* ================= FETCH NUMBERS ================= */
+async function getNumbers() {
+  const url =
+    `${CONFIG.baseUrl}/agent/res/data_smsnumbers.php?` +
+    `frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1`;
+
+  const data = await request("GET", url, null, {
+    Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+    "X-Requested-With": "XMLHttpRequest"
+  });
+
+  return fixNumbers(safeJSON(data));
+}
+
+/* ================= FETCH SMS ================= */
 async function getSMS() {
   await login();
 
-  // Wide range: past to far future
-  const startDate = "2026-02-26";
+  // Wide range taake aaj ke naye SMS bhi aa jaye (tumhare last message se inspired)
+  const startDate = "2026-02-21";
   const endDate = "2099-12-31";
 
-  const params = [
-    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}`,
-    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}`,
-    `ftermination=`,
-    `fclient=`,
-    `fnum=`,
-    `fcli=`,
-    `fgdate=0`,
-    `fgtermination=0`,
-    `fgclient=0`,
-    `fgnumber=0`,
-    `fgcli=0`,
-    `fg=0`,
-    `sEcho=1`,
-    `iColumns=11`,
-    `sColumns=%2C%2C%2C%2C%2C%2C%2C%2C%2C%2C`,
-    `iDisplayStart=0`,
-    `iDisplayLength=2000`,  // your value
-    // Full DataTables params (from your log)
-    `mDataProp_0=0`, `sSearch_0=`, `bRegex_0=false`, `bSearchable_0=true`, `bSortable_0=true`,
-    `mDataProp_1=1`, `sSearch_1=`, `bRegex_1=false`, `bSearchable_1=true`, `bSortable_1=true`,
-    `mDataProp_2=2`, `sSearch_2=`, `bRegex_2=false`, `bSearchable_2=true`, `bSortable_2=true`,
-    `mDataProp_3=3`, `sSearch_3=`, `bRegex_3=false`, `bSearchable_3=true`, `bSortable_3=true`,
-    `mDataProp_4=4`, `sSearch_4=`, `bRegex_4=false`, `bSearchable_4=true`, `bSortable_4=true`,
-    `mDataProp_5=5`, `sSearch_5=`, `bRegex_5=false`, `bSearchable_5=true`, `bSortable_5=true`,
-    `mDataProp_6=6`, `sSearch_6=`, `bRegex_6=false`, `bSearchable_6=true`, `bSortable_6=true`,
-    `mDataProp_7=7`, `sSearch_7=`, `bRegex_7=false`, `bSearchable_7=true`, `bSortable_7=true`,
-    `mDataProp_8=8`, `sSearch_8=`, `bRegex_8=false`, `bSearchable_8=true`, `bSortable_8=true`,
-    `mDataProp_9=9`, `sSearch_9=`, `bRegex_9=false`, `bSearchable_9=true`, `bSortable_9=true`,
-    `mDataProp_10=10`, `sSearch_10=`, `bRegex_10=false`, `bSearchable_10=true`, `bSortable_10=true`,
-    `sSearch=`,
-    `bRegex=false`,
-    `iSortCol_0=0`,
-    `sSortDir_0=desc`,
-    `iSortingCols=1`,
-    `_${Date.now()}`
-  ].join('&');
+  const url =
+    `${CONFIG.baseUrl}/agent/res/data_smscdr.php?` +
+    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}&` +
+    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}&` +
+    `frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&` +
+    `sEcho=1&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=5000`;
 
-  const urlPath = `/client/ajax/dt_reports.php?${params}`;
-
-  // Load parent page
-  try {
-    await makeRequest("GET", "/client/", null, {
-      Referer: `${CONFIG.baseUrl}/client/Numbers`
-    });
-  } catch {}
-
-  let data = await makeRequest("GET", urlPath, null, {
-    Referer: `${CONFIG.baseUrl}/client/Numbers`,
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "application/json, text/javascript, */*; q=0.01"
+  const data = await request("GET", url, null, {
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+    "X-Requested-With": "XMLHttpRequest"
   });
 
-  console.log("[SMS RAW]", data.substring(0, 800));
+  console.log("[SMS RAW PREVIEW]", data.substring(0, 600)); // debug
 
-  // Retry if needed
-  if (data.includes("Direct Script Access") || data.includes("login")) {
-    await login();
-    data = await makeRequest("GET", urlPath, null, {
-      Referer: `${CONFIG.baseUrl}/client/Numbers`,
-      "X-Requested-With": "XMLHttpRequest"
-    });
-  }
-
-  const json = safeJSON(data);
-  return fixSMS(json);
+  return fixSMS(safeJSON(data));
 }
 
-/* ROUTE */
+/* ================= API ROUTE ================= */
 router.get("/", async (req, res) => {
   const { type } = req.query;
 
-  if (!type) return res.json({ error: "Use ?type=numbers or ?type=sms" });
+  if (!type) {
+    return res.json({ error: "Use ?type=numbers or ?type=sms" });
+  }
 
   try {
+    await login();
+
     if (type === "numbers") return res.json(await getNumbers());
     if (type === "sms") return res.json(await getSMS());
+
     res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error(err);
-    res.json({ error: err.message || "Failed" });
+    console.error("[ERROR]", err.message);
+    res.json({ error: err.message || "Request failed" });
   }
 });
 
