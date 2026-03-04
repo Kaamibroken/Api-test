@@ -1,6 +1,6 @@
 const express = require("express");
 const http = require("http");
-const https = require("https"); // kept but not needed here
+const https = require("https");
 const zlib = require("zlib");
 const querystring = require("querystring");
 
@@ -15,21 +15,22 @@ const CONFIG = {
 };
 
 let cookies = [];
+let isLoggedIn = false; // track session state roughly
 
 /* ================= SAFE JSON ================= */
 function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: "Invalid JSON from server", raw: text.substring(0, 300) };
+    return { error: "Invalid JSON from server", raw: text.substring(0, 200) };
   }
 }
 
 /* ================= REQUEST ================= */
 function request(method, path, data = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
-    const url = `\( {CONFIG.baseUrl} \){path}`;
-    const lib = url.startsWith("https") ? https : http;
+    const fullUrl = `\( {CONFIG.baseUrl} \){path.startsWith('/') ? path : '/' + path}`;
+    const lib = fullUrl.startsWith("https") ? https : http;
 
     const headers = {
       "User-Agent": CONFIG.userAgent,
@@ -45,12 +46,13 @@ function request(method, path, data = null, extraHeaders = {}) {
       headers.Origin = CONFIG.baseUrl;
     }
 
-    const req = lib.request(url, { method, headers }, res => {
-      // Capture new cookies
+    console.log(`[REQ] ${method} ${fullUrl}`); // debug - remove later
+
+    const req = lib.request(fullUrl, { method, headers }, res => {
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
-          const cookiePart = c.split(";")[0];
-          if (!cookies.includes(cookiePart)) cookies.push(cookiePart);
+          const part = c.split(";")[0];
+          if (!cookies.includes(part)) cookies.push(part);
         });
       }
 
@@ -63,8 +65,9 @@ function request(method, path, data = null, extraHeaders = {}) {
           if (res.headers["content-encoding"] === "gzip") {
             buffer = zlib.gunzipSync(buffer);
           }
-        } catch (e) {}
-        resolve(buffer.toString());
+        } catch {}
+        const body = buffer.toString();
+        resolve(body);
       });
     });
 
@@ -74,75 +77,108 @@ function request(method, path, data = null, extraHeaders = {}) {
   });
 }
 
-/* ================= LOGIN ================= */
-async function login() {
-  cookies = []; // reset cookies each time (or keep if you want persistent session)
+/* ================= SMART LOGIN / RE-LOGIN ================= */
+async function ensureLoggedIn(maxRetries = 1) {
+  if (isLoggedIn) return true;
 
-  // Get login page to extract CAPTCHA
-  const page = await request("GET", "/login");
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      cookies = []; // fresh start per login attempt
+      const page = await request("GET", "/login");
 
-  // Extract math captcha (What is X + Y)
-  const match = page.match(/What is (\d+) \+ (\d+)/i) || page.match(/(\d+)\s*\+\s*(\d+)/i);
-  let capt = 10; // fallback
-  if (match) {
-    capt = Number(match[1]) + Number(match[2]);
-  }
+      // Multiple patterns for robustness
+      let capt = 0;
+      const patterns = [
+        /What is (\d+)\s*[\+\-]\s*(\d+)\s*=?\s*\??/i,
+        /(\d+)\s*[\+\-]\s*(\d+)/i,
+        /Captcha.*?(\d+)\s*[\+\-]\s*(\d+)/i
+      ];
 
-  const form = querystring.stringify({
-    username: CONFIG.username,
-    password: CONFIG.password,
-    capt: capt
-  });
+      for (const regex of patterns) {
+        const match = page.match(regex);
+        if (match) {
+          capt = Number(match[1]) + Number(match[2]); // assuming + (change if - appears)
+          break;
+        }
+      }
 
-  const loginRes = await request(
-    "POST",
-    "/signin",
-    form,
-    { Referer: `${CONFIG.baseUrl}/login` }
-  );
+      if (capt === 0) {
+        console.warn("[CAPTCHA] No math expression found, using fallback 10");
+        capt = 10;
+      }
 
-  // Optional: check if login succeeded (look for redirect or dashboard text)
-  if (loginRes.includes("Please sign in") || loginRes.includes("Invalid")) {
-    throw new Error("Login failed - check credentials or CAPTCHA parsing");
+      const form = querystring.stringify({
+        username: CONFIG.username,
+        password: CONFIG.password,
+        capt: capt
+      });
+
+      const loginBody = await request(
+        "POST",
+        "/signin",
+        form,
+        { Referer: `${CONFIG.baseUrl}/login` }
+      );
+
+      // Check success signals
+      if (
+        loginBody.includes("Please sign in") ||
+        loginBody.includes("Invalid") ||
+        loginBody.includes("captcha") ||
+        loginBody.length < 200 // too short → probably error page
+      ) {
+        throw new Error(`Login attempt ${attempt} failed - bad response`);
+      }
+
+      // Quick check: try to access a protected page
+      const test = await request("GET", "/agent/");
+      if (test.includes("Please sign in") || test.includes("login")) {
+        throw new Error("Session not active after login");
+      }
+
+      isLoggedIn = true;
+      console.log("[LOGIN] Success");
+      return true;
+
+    } catch (e) {
+      console.error(`[LOGIN] Attempt ${attempt} failed: ${e.message}`);
+      if (attempt === maxRetries + 1) throw e;
+      await new Promise(r => setTimeout(r, 1500)); // small delay before retry
+    }
   }
 }
 
-/* ================= FIX NUMBERS (adjust columns if needed after testing) ================= */
+/* ================= FIX NUMBERS ================= */
 function fixNumbers(data) {
-  if (!data.aaData) return data;
-
+  if (!data?.aaData) return data;
   data.aaData = data.aaData.map(row => [
-    row[1] || "",           // number / range
-    "",                     // empty as in original
-    row[3] || "",           // status / type?
-    "Weekly",               // hardcoded as in original
-    (row[4] || "").replace(/<[^>]+>/g, "").trim(), // clean html
-    (row[7] || "").replace(/<[^>]+>/g, "").trim()  // another field
+    row[1] || "",
+    "",
+    row[3] || "",
+    "Weekly",
+    (row[4] || "").replace(/<[^>]+>/g, "").trim(),
+    (row[7] || "").replace(/<[^>]+>/g, "").trim()
   ]);
-
   return data;
 }
 
 /* ================= FIX SMS ================= */
 function fixSMS(data) {
-  if (!data.aaData) return data;
+  if (!data?.aaData) return data;
 
   data.aaData = data.aaData
     .map(row => {
-      let message = (row[5] || "")
-        .replace(/legendhacker/gi, "") // from original — keep or remove if not needed
-        .trim();
-
-      if (!message) return null;
+      let msg = (row[5] || "").replace(/legendhacker/gi, "").trim();
+      if (!msg) return null;
 
       return [
-        row[0] || "", // date/time
-        row[1] || "", // range?
-        row[2] || "", // from number
-        row[3] || "", // service/provider
-        message,      // OTP / message
-        "$",          // placeholder as in original
-        row[7] || 0   // status / price?
+        row[0] || "",
+        row[1] || "",
+        row[2] || "",
+        row[3] || "",
+        msg,
+        "$",
+        row[7] || 0
       ];
     })
     .filter(Boolean);
@@ -152,27 +188,43 @@ function fixSMS(data) {
 
 /* ================= FETCH NUMBERS ================= */
 async function getNumbers() {
+  await ensureLoggedIn();
+
   const params = new URLSearchParams({
     frange: "",
     fclient: "",
     sEcho: "2",
     iDisplayStart: "0",
     iDisplayLength: "-1"
-    // add more params if server requires them strictly
   }).toString();
 
-  const urlPath = `/agent/res/data_smsnumbers.php?${params}`;
-
-  const data = await request("GET", urlPath, null, {
+  const body = await request("GET", `/agent/res/data_smsnumbers.php?${params}`, null, {
     Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
     "X-Requested-With": "XMLHttpRequest"
   });
 
-  return fixNumbers(safeJSON(data));
+  const json = safeJSON(body);
+
+  // Auto re-login trigger if looks like logged out
+  if (
+    !json.aaData ||
+    body.includes("Please sign in") ||
+    body.includes("Direct Script Access") ||
+    body.includes("login") ||
+    (Array.isArray(json.aaData) && json.aaData.length === 0 && body.length < 500)
+  ) {
+    isLoggedIn = false;
+    await ensureLoggedIn();
+    return getNumbers(); // retry once
+  }
+
+  return fixNumbers(json);
 }
 
-/* ================= FETCH SMS (today's) ================= */
+/* ================= FETCH SMS ================= */
 async function getSMS() {
+  await ensureLoggedIn();
+
   const today = new Date();
   const d = `\( {today.getFullYear()}- \){String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
@@ -184,18 +236,30 @@ async function getSMS() {
     fnum: "",
     fcli: "",
     fg: "0",
-    iDisplayLength: "5000" // or -1 if server allows
-    // fgdate, fgmonth etc. left empty as in your log
+    iDisplayLength: "5000"
   }).toString();
 
-  const urlPath = `/agent/res/data_smscdr.php?${params}`;
-
-  const data = await request("GET", urlPath, null, {
-    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`, // or /SMSCDRStats if better
+  const body = await request("GET", `/agent/res/data_smscdr.php?${params}`, null, {
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRStats`, // or /SMSCDRReports — test both
     "X-Requested-With": "XMLHttpRequest"
   });
 
-  return fixSMS(safeJSON(data));
+  const json = safeJSON(body);
+
+  // Same auto-relogin check
+  if (
+    !json.aaData ||
+    body.includes("Please sign in") ||
+    body.includes("Direct Script Access") ||
+    body.includes("login") ||
+    (Array.isArray(json.aaData) && json.aaData.length === 0 && body.length < 500)
+  ) {
+    isLoggedIn = false;
+    await ensureLoggedIn();
+    return getSMS(); // retry once
+  }
+
+  return fixSMS(json);
 }
 
 /* ================= API ROUTE ================= */
@@ -207,15 +271,17 @@ router.get("/", async (req, res) => {
   }
 
   try {
-    await login();
-
-    if (type === "numbers") return res.json(await getNumbers());
-    if (type === "sms") return res.json(await getSMS());
-
+    if (type === "numbers") {
+      return res.json(await getNumbers());
+    }
+    if (type === "sms") {
+      return res.json(await getSMS());
+    }
     res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error(err);
-    res.json({ error: err.message || "Request failed" });
+    console.error("[API ERROR]", err);
+    isLoggedIn = false; // force relogin next time
+    res.status(500).json({ error: err.message || "Server error" });
   }
 });
 
