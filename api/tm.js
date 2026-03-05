@@ -1,14 +1,13 @@
 const express = require("express");
 const http = require("http");
-const https = require("https");
 const zlib = require("zlib");
 const querystring = require("querystring");
 
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "http://15.235.182.3/konekta",
-  username: "Junaidaliniz",
+  baseUrl: "http://85.195.94.50",
+  username: "junaidaliniz",
   password: "Junaid123",
   userAgent:
     "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
@@ -74,10 +73,13 @@ function request(method, url, data = null, extraHeaders = {}) {
 async function login() {
   cookies = [];
 
-  const page = await request("GET", `${CONFIG.baseUrl}/sign-in`);
+  const page = await request("GET", `${CONFIG.baseUrl}/sms/SignIn`);
 
-  const match = page.match(/What is (\d+) \+ (\d+)/i);
+  // Auto solve CAPTCHA (text-based math)
+  const match = page.match(/(\d+)\s*\+\s*(\d+)\s*=\s*\?/i);
   const capt = match ? Number(match[1]) + Number(match[2]) : 10;
+
+  console.log("[CAPTCHA AUTO]", capt);
 
   const form = querystring.stringify({
     username: CONFIG.username,
@@ -87,10 +89,16 @@ async function login() {
 
   await request(
     "POST",
-    `${CONFIG.baseUrl}/signin`,
+    `${CONFIG.baseUrl}/sms/signmein`,
     form,
-    { Referer: `${CONFIG.baseUrl}/sign-in` }
+    { Referer: `${CONFIG.baseUrl}/sms/SignIn` }
   );
+
+  // Test session
+  const test = await request("GET", `${CONFIG.baseUrl}/sms/reseller/`);
+  if (test.includes("SignIn") || test.includes("login")) {
+    throw new Error("Login failed");
+  }
 }
 
 /* ================= FIX NUMBERS ================= */
@@ -139,11 +147,11 @@ function fixSMS(data) {
 /* ================= FETCH NUMBERS ================= */
 async function getNumbers() {
   const url =
-    `${CONFIG.baseUrl}/agent/res/data_smsranges.php?` +
-    `sEcho=2&iColumns=6&sColumns=%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1`;
+    `${CONFIG.baseUrl}/sms/reseller/ajax/dt_numbers.php?` +
+    `ftermination=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1`;
 
   const data = await request("GET", url, null, {
-    Referer: `${CONFIG.baseUrl}/agent/SMSRanges`,
+    Referer: `${CONFIG.baseUrl}/sms/reseller/`,
     "X-Requested-With": "XMLHttpRequest"
   });
 
@@ -161,12 +169,13 @@ async function getSMS() {
   ).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   const url =
-    `${CONFIG.baseUrl}/agent/res/data_smscdr.php?` +
+    `${CONFIG.baseUrl}/sms/reseller/ajax/dt_reports.php?` +
     `fdate1=\( {d}%2000:00:00&fdate2= \){d}%2023:59:59` +
-    `&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&iDisplayLength=5000`;
+    `&ftermination=&fclient=&fnum=&fcli=&fgdate=0&fgtermination=0&fgclient=0&fgnumber=0&fgcli=0&fg=0&` +
+    `sEcho=2&iDisplayStart=0&iDisplayLength=5000`;
 
   const data = await request("GET", url, null, {
-    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+    Referer: `${CONFIG.baseUrl}/sms/reseller/SMSReports`,
     "X-Requested-With": "XMLHttpRequest"
   });
 
