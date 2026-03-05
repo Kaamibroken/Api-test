@@ -7,9 +7,9 @@ const querystring = require("querystring");
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "http://51.77.52.79/ints",
-  username: "ZONEY12",
-  password: "ZONEY12",
+  baseUrl: "http://15.235.182.3/konekta",
+  username: "Junaidaliniz",
+  password: "Junaid123",
   userAgent:
     "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
 };
@@ -74,7 +74,7 @@ function request(method, url, data = null, extraHeaders = {}) {
 async function login() {
   cookies = [];
 
-  const page = await request("GET", `${CONFIG.baseUrl}/login`);
+  const page = await request("GET", `${CONFIG.baseUrl}/sign-in`);
 
   const match = page.match(/What is (\d+) \+ (\d+)/i);
   const capt = match ? Number(match[1]) + Number(match[2]) : 10;
@@ -89,7 +89,7 @@ async function login() {
     "POST",
     `${CONFIG.baseUrl}/signin`,
     form,
-    { Referer: `${CONFIG.baseUrl}/login` }
+    { Referer: `${CONFIG.baseUrl}/sign-in` }
   );
 }
 
@@ -139,11 +139,11 @@ function fixSMS(data) {
 /* ================= FETCH NUMBERS ================= */
 async function getNumbers() {
   const url =
-    `${CONFIG.baseUrl}/agent/res/data_smsnumbers.php?` +
-    `frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1`;
+    `${CONFIG.baseUrl}/agent/res/data_smsranges.php?` +
+    `sEcho=2&iColumns=6&sColumns=%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1`;
 
   const data = await request("GET", url, null, {
-    Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+    Referer: `${CONFIG.baseUrl}/agent/SMSRanges`,
     "X-Requested-With": "XMLHttpRequest"
   });
 
@@ -154,23 +154,21 @@ async function getNumbers() {
 async function getSMS() {
   await login();
 
-  // Wide range taake aaj ke naye SMS bhi aa jaye
-  const startDate = "2026-03-02";
-  const endDate = "2099-12-31";
+  const today = new Date();
+
+  const d = `\( {today.getFullYear()}- \){String(
+    today.getMonth() + 1
+  ).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   const url =
     `${CONFIG.baseUrl}/agent/res/data_smscdr.php?` +
-    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}&` +
-    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}&` +
-    `frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&` +
-    `sEcho=2&iColumns=9&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=5000`;
+    `fdate1=\( {d}%2000:00:00&fdate2= \){d}%2023:59:59` +
+    `&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&iDisplayLength=5000`;
 
   const data = await request("GET", url, null, {
     Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
     "X-Requested-With": "XMLHttpRequest"
   });
-
-  console.log("[SMS RAW PREVIEW]", data.substring(0, 600)); // debug
 
   return fixSMS(safeJSON(data));
 }
