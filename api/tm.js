@@ -10,7 +10,7 @@ const CONFIG = {
   username: "junaidaliniz",
   password: "Junaid123",
   userAgent:
-    "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
+    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/144 Mobile"
 };
 
 let cookies = [];
@@ -20,6 +20,7 @@ function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
+    console.log("[DEBUG RAW NON-JSON]", text.substring(0, 500)); // helps see HTML/error
     return { error: "Invalid JSON from server" };
   }
 }
@@ -42,7 +43,11 @@ function request(method, url, data = null, extraHeaders = {}) {
       headers["Content-Length"] = Buffer.byteLength(data);
     }
 
+    console.log(`[REQ] ${method} ${url}`);
+
     const req = lib.request(url, { method, headers }, res => {
+      console.log(`[RES] Status: ${res.statusCode} for ${url}`);
+
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
           cookies.push(c.split(";")[0]);
@@ -59,7 +64,9 @@ function request(method, url, data = null, extraHeaders = {}) {
             buffer = zlib.gunzipSync(buffer);
           }
         } catch {}
-        resolve(buffer.toString());
+        const body = buffer.toString();
+        console.log("[RES BODY PREVIEW]", body.substring(0, 600));
+        resolve(body);
       });
     });
 
@@ -75,11 +82,10 @@ async function login() {
 
   const page = await request("GET", `${CONFIG.baseUrl}/sms/SignIn`);
 
-  // Auto solve CAPTCHA (text-based math)
   const match = page.match(/(\d+)\s*\+\s*(\d+)\s*=\s*\?/i);
   const capt = match ? Number(match[1]) + Number(match[2]) : 10;
 
-  console.log("[CAPTCHA AUTO]", capt);
+  console.log("[CAPTCHA]", capt);
 
   const form = querystring.stringify({
     username: CONFIG.username,
@@ -97,7 +103,7 @@ async function login() {
   // Test session
   const test = await request("GET", `${CONFIG.baseUrl}/sms/reseller/`);
   if (test.includes("SignIn") || test.includes("login")) {
-    throw new Error("Login failed");
+    throw new Error("Login failed - check credentials");
   }
 }
 
@@ -106,9 +112,9 @@ function fixNumbers(data) {
   if (!data.aaData) return data;
 
   data.aaData = data.aaData.map(row => [
-    row[1],
+    row[1] || "",
     "",
-    row[3],
+    row[3] || "",
     "Weekly",
     (row[4] || "").replace(/<[^>]+>/g, "").trim(),
     (row[7] || "").replace(/<[^>]+>/g, "").trim()
@@ -130,11 +136,11 @@ function fixSMS(data) {
       if (!message) return null;
 
       return [
-        row[0], // date
-        row[1], // range
-        row[2], // number
-        row[3], // service
-        message, // OTP MESSAGE
+        row[0],
+        row[1],
+        row[2],
+        row[3],
+        message,
         "$",
         row[7] || 0
       ];
@@ -162,22 +168,23 @@ async function getNumbers() {
 async function getSMS() {
   await login();
 
-  const today = new Date();
-
-  const d = `\( {today.getFullYear()}- \){String(
-    today.getMonth() + 1
-  ).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  // Wide range to include today's new OTPs
+  const startDate = "2026-01-01"; // past
+  const endDate = "2099-12-31";   // future
 
   const url =
     `${CONFIG.baseUrl}/sms/reseller/ajax/dt_reports.php?` +
-    `fdate1=\( {d}%2000:00:00&fdate2= \){d}%2023:59:59` +
-    `&ftermination=&fclient=&fnum=&fcli=&fgdate=0&fgtermination=0&fgclient=0&fgnumber=0&fgcli=0&fg=0&` +
+    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}&` +
+    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}&` +
+    `ftermination=&fclient=&fnum=&fcli=&fgdate=0&fgtermination=0&fgclient=0&fgnumber=0&fgcli=0&fg=0&` +
     `sEcho=2&iDisplayStart=0&iDisplayLength=5000`;
 
   const data = await request("GET", url, null, {
     Referer: `${CONFIG.baseUrl}/sms/reseller/SMSReports`,
     "X-Requested-With": "XMLHttpRequest"
   });
+
+  console.log("[SMS RAW PREVIEW]", data.substring(0, 600));
 
   return fixSMS(safeJSON(data));
 }
@@ -198,6 +205,7 @@ router.get("/", async (req, res) => {
 
     res.json({ error: "Invalid type" });
   } catch (err) {
+    console.error("[ERROR]", err.message);
     res.json({ error: err.message });
   }
 });
