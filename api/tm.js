@@ -1,5 +1,6 @@
 const express = require("express");
 const http = require("http");
+const https = require("https");
 const zlib = require("zlib");
 const querystring = require("querystring");
 
@@ -20,7 +21,7 @@ function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    console.log("[DEBUG RAW NON-JSON]", text.substring(0, 500)); // helps see HTML/error
+    console.log("[DEBUG RAW NON-JSON]", text.substring(0, 500));
     return { error: "Invalid JSON from server" };
   }
 }
@@ -103,7 +104,7 @@ async function login() {
   // Test session
   const test = await request("GET", `${CONFIG.baseUrl}/sms/reseller/`);
   if (test.includes("SignIn") || test.includes("login")) {
-    throw new Error("Login failed - check credentials");
+    throw new Error("Login failed");
   }
 }
 
@@ -161,6 +162,8 @@ async function getNumbers() {
     "X-Requested-With": "XMLHttpRequest"
   });
 
+  console.log("[NUMBERS RAW PREVIEW]", data.substring(0, 600));
+
   return fixNumbers(safeJSON(data));
 }
 
@@ -168,15 +171,13 @@ async function getNumbers() {
 async function getSMS() {
   await login();
 
-  // Wide range to include today's new OTPs
-  const startDate = "2026-01-01"; // past
-  const endDate = "2099-12-31";   // future
+  const today = new Date();
+  const d = `\( {today.getFullYear()}- \){String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   const url =
     `${CONFIG.baseUrl}/sms/reseller/ajax/dt_reports.php?` +
-    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}&` +
-    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}&` +
-    `ftermination=&fclient=&fnum=&fcli=&fgdate=0&fgtermination=0&fgclient=0&fgnumber=0&fgcli=0&fg=0&` +
+    `fdate1=\( {d}%2000:00:00&fdate2= \){d}%2023:59:59` +
+    `&ftermination=&fclient=&fnum=&fcli=&fgdate=0&fgtermination=0&fgclient=0&fgnumber=0&fgcli=0&fg=0&` +
     `sEcho=2&iDisplayStart=0&iDisplayLength=5000`;
 
   const data = await request("GET", url, null, {
