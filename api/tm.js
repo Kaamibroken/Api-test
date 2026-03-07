@@ -7,11 +7,11 @@ const querystring = require("querystring");
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "http://85.195.94.50",
-  username: "junaidaliniz",
-  password: "Junaid123",
+  baseUrl: "http://15.235.182.3/konekta",
+  username: "kami526",
+  password: "kami526",
   userAgent:
-    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/144 Mobile"
+    "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
 };
 
 let cookies = [];
@@ -21,7 +21,6 @@ function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    console.log("[DEBUG RAW NON-JSON]", text.substring(0, 500));
     return { error: "Invalid JSON from server" };
   }
 }
@@ -44,11 +43,7 @@ function request(method, url, data = null, extraHeaders = {}) {
       headers["Content-Length"] = Buffer.byteLength(data);
     }
 
-    console.log(`[REQ] ${method} ${url}`);
-
     const req = lib.request(url, { method, headers }, res => {
-      console.log(`[RES] Status: ${res.statusCode} for ${url}`);
-
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
           cookies.push(c.split(";")[0]);
@@ -65,9 +60,7 @@ function request(method, url, data = null, extraHeaders = {}) {
             buffer = zlib.gunzipSync(buffer);
           }
         } catch {}
-        const body = buffer.toString();
-        console.log("[RES BODY PREVIEW]", body.substring(0, 600));
-        resolve(body);
+        resolve(buffer.toString());
       });
     });
 
@@ -81,12 +74,10 @@ function request(method, url, data = null, extraHeaders = {}) {
 async function login() {
   cookies = [];
 
-  const page = await request("GET", `${CONFIG.baseUrl}/sms/SignIn`);
+  const page = await request("GET", `${CONFIG.baseUrl}/sign-in`);
 
-  const match = page.match(/(\d+)\s*\+\s*(\d+)\s*=\s*\?/i);
+  const match = page.match(/What is (\d+) \+ (\d+)/i);
   const capt = match ? Number(match[1]) + Number(match[2]) : 10;
-
-  console.log("[CAPTCHA]", capt);
 
   const form = querystring.stringify({
     username: CONFIG.username,
@@ -96,16 +87,10 @@ async function login() {
 
   await request(
     "POST",
-    `${CONFIG.baseUrl}/sms/signmein`,
+    `${CONFIG.baseUrl}/signin`,
     form,
-    { Referer: `${CONFIG.baseUrl}/sms/SignIn` }
+    { Referer: `${CONFIG.baseUrl}/sign-in` }
   );
-
-  // Test session
-  const test = await request("GET", `${CONFIG.baseUrl}/sms/reseller/`);
-  if (test.includes("SignIn") || test.includes("login")) {
-    throw new Error("Login failed");
-  }
 }
 
 /* ================= FIX NUMBERS ================= */
@@ -113,9 +98,9 @@ function fixNumbers(data) {
   if (!data.aaData) return data;
 
   data.aaData = data.aaData.map(row => [
-    row[1] || "",
+    row[1],
     "",
-    row[3] || "",
+    row[3],
     "Weekly",
     (row[4] || "").replace(/<[^>]+>/g, "").trim(),
     (row[7] || "").replace(/<[^>]+>/g, "").trim()
@@ -137,11 +122,11 @@ function fixSMS(data) {
       if (!message) return null;
 
       return [
-        row[0],
-        row[1],
-        row[2],
-        row[3],
-        message,
+        row[0], // date
+        row[1], // range
+        row[2], // number
+        row[3], // service
+        message, // OTP MESSAGE
         "$",
         row[7] || 0
       ];
@@ -154,15 +139,13 @@ function fixSMS(data) {
 /* ================= FETCH NUMBERS ================= */
 async function getNumbers() {
   const url =
-    `${CONFIG.baseUrl}/sms/reseller/ajax/dt_numbers.php?` +
-    `ftermination=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1`;
+    `${CONFIG.baseUrl}/agent/res/data_smsranges.php?` +
+    `sEcho=2&iColumns=6&sColumns=%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1`;
 
   const data = await request("GET", url, null, {
-    Referer: `${CONFIG.baseUrl}/sms/reseller/`,
+    Referer: `${CONFIG.baseUrl}/agent/SMSRanges`,
     "X-Requested-With": "XMLHttpRequest"
   });
-
-  console.log("[NUMBERS RAW PREVIEW]", data.substring(0, 600));
 
   return fixNumbers(safeJSON(data));
 }
@@ -172,20 +155,20 @@ async function getSMS() {
   await login();
 
   const today = new Date();
-  const d = `\( {today.getFullYear()}- \){String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+  const d = `\( {today.getFullYear()}- \){String(
+    today.getMonth() + 1
+  ).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   const url =
-    `${CONFIG.baseUrl}/sms/reseller/ajax/dt_reports.php?` +
+    `${CONFIG.baseUrl}/agent/res/data_smscdr.php?` +
     `fdate1=\( {d}%2000:00:00&fdate2= \){d}%2023:59:59` +
-    `&ftermination=&fclient=&fnum=&fcli=&fgdate=0&fgtermination=0&fgclient=0&fgnumber=0&fgcli=0&fg=0&` +
-    `sEcho=2&iDisplayStart=0&iDisplayLength=5000`;
+    `&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&iDisplayLength=5000`;
 
   const data = await request("GET", url, null, {
-    Referer: `${CONFIG.baseUrl}/sms/reseller/SMSReports`,
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
     "X-Requested-With": "XMLHttpRequest"
   });
-
-  console.log("[SMS RAW PREVIEW]", data.substring(0, 600));
 
   return fixSMS(safeJSON(data));
 }
@@ -206,7 +189,6 @@ router.get("/", async (req, res) => {
 
     res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error("[ERROR]", err.message);
     res.json({ error: err.message });
   }
 });
