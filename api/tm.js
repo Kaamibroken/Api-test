@@ -15,13 +15,14 @@ const CONFIG = {
 };
 
 let cookies = [];
+let isLoggedIn = false;
 
 /* ================= SAFE JSON ================= */
 function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: "Invalid JSON from server" };
+    return { error: "Invalid JSON from server", raw: text.substring(0, 300) };
   }
 }
 
@@ -43,7 +44,11 @@ function request(method, url, data = null, extraHeaders = {}) {
       headers["Content-Length"] = Buffer.byteLength(data);
     }
 
+    console.log(`[REQ] ${method} ${url}`);
+
     const req = lib.request(url, { method, headers }, res => {
+      console.log(`[RES] Status: ${res.statusCode} for ${url}`);
+
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
           cookies.push(c.split(";")[0]);
@@ -60,7 +65,9 @@ function request(method, url, data = null, extraHeaders = {}) {
             buffer = zlib.gunzipSync(buffer);
           }
         } catch {}
-        resolve(buffer.toString());
+        const body = buffer.toString();
+        console.log("[RES BODY PREVIEW]", body.substring(0, 600));
+        resolve(body);
       });
     });
 
@@ -70,14 +77,31 @@ function request(method, url, data = null, extraHeaders = {}) {
   });
 }
 
-/* ================= LOGIN ================= */
+/* ================= AUTO-CORRECT CAPTCHA + LOGIN ================= */
 async function login() {
   cookies = [];
+  isLoggedIn = false;
 
   const page = await request("GET", `${CONFIG.baseUrl}/sign-in`);
 
-  const match = page.match(/What is (\d+) \+ (\d+)/i);
-  const capt = match ? Number(match[1]) + Number(match[2]) : 10;
+  // Multiple patterns for robust CAPTCHA detection
+  const patterns = [
+    /What is (\d+)\s*\+\s*(\d+)/i,
+    /(\d+)\s*\+\s*(\d+)/i,
+    /(\d+)\s*plus\s*(\d+)/i,
+    /Captcha.*?(\d+)\s*\+\s*(\d+)/i,
+    /(\d+)\s*[\+\-]\s*(\d+)/i
+  ];
+
+  let capt = 10;
+  for (const regex of patterns) {
+    const match = page.match(regex);
+    if (match) {
+      capt = Number(match[1]) + Number(match[2]);
+      console.log("[CAPTCHA AUTO] Detected & solved:", capt);
+      break;
+    }
+  }
 
   const form = querystring.stringify({
     username: CONFIG.username,
@@ -91,6 +115,28 @@ async function login() {
     form,
     { Referer: `${CONFIG.baseUrl}/sign-in` }
   );
+
+  // Test session
+  const test = await request("GET", `${CONFIG.baseUrl}/agent/`);
+  if (test.includes("Please sign in") || test.includes("login") || test.includes("sign-in")) {
+    throw new Error("Login failed - check credentials or CAPTCHA");
+  }
+
+  isLoggedIn = true;
+  console.log("[LOGIN] Success");
+}
+
+/* ================= CHECK IF RESPONSE INDICATES EXPIRED SESSION ================= */
+function isSessionExpired(body) {
+  return (
+    body.includes("Please sign in") ||
+    body.includes("login") ||
+    body.includes("sign-in") ||
+    body.includes("session expired") ||
+    body.includes("Direct Script Access") ||
+    body.includes("Invalid") ||
+    body.length < 200 // too short, likely error page
+  );
 }
 
 /* ================= FIX NUMBERS ================= */
@@ -98,9 +144,9 @@ function fixNumbers(data) {
   if (!data.aaData) return data;
 
   data.aaData = data.aaData.map(row => [
-    row[1],
+    row[1] || "",
     "",
-    row[3],
+    row[3] || "",
     "Weekly",
     (row[4] || "").replace(/<[^>]+>/g, "").trim(),
     (row[7] || "").replace(/<[^>]+>/g, "").trim()
@@ -122,11 +168,11 @@ function fixSMS(data) {
       if (!message) return null;
 
       return [
-        row[0], // date
-        row[1], // range
-        row[2], // number
-        row[3], // service
-        message, // OTP MESSAGE
+        row[0],
+        row[1],
+        row[2],
+        row[3],
+        message,
         "$",
         row[7] || 0
       ];
@@ -136,39 +182,61 @@ function fixSMS(data) {
   return data;
 }
 
-/* ================= FETCH NUMBERS ================= */
+/* ================= FETCH NUMBERS with AUTO RE-LOGIN ================= */
 async function getNumbers() {
+  if (!isLoggedIn) await login();
+
   const url =
     `${CONFIG.baseUrl}/agent/res/data_smsranges.php?` +
     `sEcho=2&iColumns=6&sColumns=%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1`;
 
-  const data = await request("GET", url, null, {
+  let data = await request("GET", url, null, {
     Referer: `${CONFIG.baseUrl}/agent/SMSRanges`,
     "X-Requested-With": "XMLHttpRequest"
   });
 
+  // Auto re-login if expired
+  if (isSessionExpired(data)) {
+    console.log("[RELOGIN TRIGGERED] for numbers");
+    await login();
+    data = await request("GET", url, null, {
+      Referer: `${CONFIG.baseUrl}/agent/SMSRanges`,
+      "X-Requested-With": "XMLHttpRequest"
+    });
+  }
+
   return fixNumbers(safeJSON(data));
 }
 
-/* ================= FETCH SMS ================= */
+/* ================= FETCH SMS with AUTO RE-LOGIN ================= */
 async function getSMS() {
-  await login();
+  if (!isLoggedIn) await login();
 
+  // Wide range to include today's new OTPs
   const today = new Date();
-
-  const d = `\( {today.getFullYear()}- \){String(
-    today.getMonth() + 1
-  ).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const d = `\( {today.getFullYear()}- \){String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   const url =
     `${CONFIG.baseUrl}/agent/res/data_smscdr.php?` +
     `fdate1=\( {d}%2000:00:00&fdate2= \){d}%2023:59:59` +
     `&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0&iDisplayLength=5000`;
 
-  const data = await request("GET", url, null, {
+  let data = await request("GET", url, null, {
     Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
     "X-Requested-With": "XMLHttpRequest"
   });
+
+  // Auto re-login if expired
+  if (isSessionExpired(data)) {
+    console.log("[RELOGIN TRIGGERED] for SMS");
+    await login();
+    data = await request("GET", url, null, {
+      Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+      "X-Requested-With": "XMLHttpRequest"
+    });
+  }
+
+  console.log("[SMS RAW PREVIEW]", data.substring(0, 600));
 
   return fixSMS(safeJSON(data));
 }
@@ -182,14 +250,13 @@ router.get("/", async (req, res) => {
   }
 
   try {
-    await login();
-
     if (type === "numbers") return res.json(await getNumbers());
     if (type === "sms") return res.json(await getSMS());
 
     res.json({ error: "Invalid type" });
   } catch (err) {
-    res.json({ error: err.message });
+    console.error("[ERROR]", err.message);
+    res.json({ error: err.message || "Request failed" });
   }
 });
 
