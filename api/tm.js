@@ -15,7 +15,11 @@ const CONFIG = {
 
 let cookies = [];
 let isLoggedIn = false;
-let lastCapt = 4; // From your capture
+let lastCapt = 4;
+let sessionData = {
+  phpsessid: null,
+  lastActivity: null
+};
 
 /* SAFE JSON */
 function safeJSON(text) {
@@ -26,34 +30,45 @@ function safeJSON(text) {
   }
 }
 
-/* REQUEST - Same as timesms pattern */
-function makeRequest(method, path, data = null, extraHeaders = {}) {
+/* REQUEST - Enhanced with better headers */
+function makeRequest(method, path, data = null, extraHeaders = {}, isAjax = false) {
   return new Promise((resolve, reject) => {
     let cleanPath = path.startsWith('/') ? path : '/' + path;
     const fullUrl = CONFIG.baseUrl + cleanPath;
-    
-    // Parse URL for HTTPS
     const urlObj = new URL(fullUrl);
     const httpModule = urlObj.protocol === 'https:' ? https : http;
 
     console.log(`[REQ] ${method} ${fullUrl}`);
 
+    // Base headers - exactly like browser
     const headers = {
       "User-Agent": CONFIG.userAgent,
-      "Accept": "application/json, text/javascript, */*; q=0.01",
+      "Accept": isAjax ? "application/json, text/javascript, */*; q=0.01" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Encoding": "gzip, deflate, br",
-      "Accept-Language": "en-PK,en;q=0.9",
+      "Accept-Language": "en-PK,en;q=0.9,ru-RU;q=0.8,ru;q=0.7",
+      "Cache-Control": "max-age=0",
+      "Connection": "keep-alive",
       "Cookie": cookies.join("; "),
+      "Host": urlObj.hostname,
       "sec-ch-ua": '"Not:A-Brand";v="99", "Android WebView";v="145", "Chromium";v="145"',
       "sec-ch-ua-mobile": "?1",
       "sec-ch-ua-platform": '"Android"',
+      "Upgrade-Insecure-Requests": isAjax ? undefined : "1",
       ...extraHeaders
     };
+
+    // Clean undefined headers
+    Object.keys(headers).forEach(key => headers[key] === undefined && delete headers[key]);
 
     if (method === "POST" && data) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
       headers["Content-Length"] = Buffer.byteLength(data);
       headers["Origin"] = CONFIG.baseUrl;
+      headers["X-Requested-With"] = "mark.via.gp";
+    }
+
+    if (isAjax) {
+      headers["X-Requested-With"] = "mark.via.gp";
     }
 
     const options = {
@@ -66,11 +81,19 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
     };
 
     const req = httpModule.request(options, res => {
-      // Store cookies
+      // Store cookies properly
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
-          const part = c.split(";")[0];
-          if (!cookies.includes(part)) cookies.push(part);
+          const cookie = c.split(";")[0];
+          if (!cookies.some(existing => existing.startsWith(cookie.split('=')[0]))) {
+            cookies.push(cookie);
+            
+            // Extract PHPSESSID
+            if (cookie.startsWith('PHPSESSID=')) {
+              sessionData.phpsessid = cookie.split('=')[1];
+              sessionData.lastActivity = Date.now();
+            }
+          }
         });
       }
 
@@ -80,7 +103,6 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
       res.on("end", () => {
         let buffer = Buffer.concat(chunks);
         
-        // Handle compression
         const encoding = res.headers["content-encoding"];
         if (encoding === "gzip") {
           try { buffer = zlib.gunzipSync(buffer); } catch {}
@@ -90,7 +112,14 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
           try { if (zlib.brotliDecompressSync) buffer = zlib.brotliDecompressSync(buffer); } catch {}
         }
         
-        resolve(buffer.toString());
+        const responseText = buffer.toString();
+        
+        // Check for direct script access
+        if (responseText.includes("Direct Script Access")) {
+          console.log("[WARN] Direct Script Access blocked");
+        }
+        
+        resolve(responseText);
       });
     });
 
@@ -100,70 +129,85 @@ function makeRequest(method, path, data = null, extraHeaders = {}) {
   });
 }
 
-/* LOGIN - Same pattern as timesms */
-async function login() {
+/* LOGIN - Enhanced */
+async function login(force = false) {
+  if (isLoggedIn && !force) return true;
+  
   cookies = [];
   isLoggedIn = false;
 
-  // Get sign-in page
-  const page = await makeRequest("GET", "/sign-in", null, {
-    "Accept": "text/html"
-  });
+  try {
+    console.log("[LOGIN] Starting...");
+    
+    // Step 1: Visit main page first
+    await makeRequest("GET", "/", null, {
+      "Accept": "text/html"
+    });
+    
+    // Step 2: Get sign-in page
+    const page = await makeRequest("GET", "/sign-in", null, {
+      "Accept": "text/html"
+    });
 
-  // Extract CAPTCHA - from your capture it was "4"
-  // But if dynamic, try to find
-  let capt = lastCapt;
-  
-  // Try to find CAPTCHA question
-  const match = page.match(/What is (\d+)\s*\+\s*(\d+)/i) ||
-                page.match(/captcha.*?(\d+).*?(\d+)/i) ||
-                page.match(/name="capt".*?value="?(\d+)"?/i);
-  
-  if (match) {
-    if (match[1] && match[2]) {
+    // Extract CAPTCHA
+    let capt = lastCapt;
+    const match = page.match(/What is (\d+)\s*\+\s*(\d+)/i) ||
+                  page.match(/captcha.*?(\d+).*?(\d+)/i);
+    
+    if (match && match[1] && match[2]) {
       capt = Number(match[1]) + Number(match[2]);
-    } else if (match[1]) {
-      capt = match[1];
     }
+
+    console.log("[LOGIN] Using CAPTCHA:", capt);
+    lastCapt = capt;
+
+    // Step 3: Submit login
+    const form = querystring.stringify({
+      username: CONFIG.username,
+      password: CONFIG.password,
+      capt: capt
+    });
+
+    const loginResult = await makeRequest("POST", "/signin", form, {
+      "Referer": `${CONFIG.baseUrl}/sign-in`,
+      "Accept": "text/html"
+    });
+
+    // Step 4: Verify login - visit agent page
+    const agentPage = await makeRequest("GET", "/agent/", null, {
+      "Referer": `${CONFIG.baseUrl}/sign-in`,
+      "Accept": "text/html"
+    });
+    
+    if (agentPage.includes("SMSDashboard") || agentPage.includes("MySMSNumbers")) {
+      isLoggedIn = true;
+      console.log("[LOGIN] Success!");
+      
+      // Step 5: Load necessary pages to establish session
+      await makeRequest("GET", "/agent/SMSDashboard", null, {
+        "Referer": `${CONFIG.baseUrl}/agent/`,
+        "Accept": "text/html"
+      });
+      
+      return true;
+    } else {
+      throw new Error("Login failed - Invalid credentials");
+    }
+  } catch (error) {
+    console.log("[LOGIN] Error:", error.message);
+    throw error;
   }
-
-  console.log("[LOGIN] Using CAPTCHA:", capt);
-  lastCapt = capt;
-
-  // Submit login form
-  const form = querystring.stringify({
-    username: CONFIG.username,
-    password: CONFIG.password,
-    capt: capt
-  });
-
-  await makeRequest("POST", "/signin", form, {
-    Referer: `${CONFIG.baseUrl}/sign-in`,
-    "X-Requested-With": "mark.via.gp"
-  });
-
-  // Verify login
-  const test = await makeRequest("GET", "/agent/", null, {
-    Referer: `${CONFIG.baseUrl}/sign-in`
-  });
-  
-  if (test.includes("Please sign in") || test.includes("login") || test.includes("sign-in")) {
-    throw new Error("Login failed");
-  }
-
-  isLoggedIn = true;
-  console.log("[LOGIN] Success");
 }
 
-/* FIX NUMBERS - Same as timesms pattern */
+/* FIX NUMBERS */
 function fixNumbers(data) {
-  if (!data.aaData) return data;
+  if (!data || !data.aaData) return data;
   
   data.aaData = data.aaData.map(row => [
     row[1] || "",        // Number
-    "",                  // Empty (like timesms)
+    "",                  // Empty
     row[2] || "",        // Client
-    "Weekly",            // Fixed type
+    "Weekly",            // Type
     (row[4] || "").replace(/<[^>]+>/g, "").trim(),  // Status
     (row[5] || "").replace(/<[^>]+>/g, "").trim()   // Expiry
   ]);
@@ -171,213 +215,233 @@ function fixNumbers(data) {
   return data;
 }
 
-/* FIX SMS - Same as timesms pattern */
+/* FIX SMS */
 function fixSMS(data) {
-  if (!data.aaData) return data;
+  if (!data || !data.aaData) return data;
   
   data.aaData = data.aaData
     .map(row => {
-      // Clean message - remove legendhacker
       let message = (row[5] || "").replace(/legendhacker/gi, "").trim();
-      
-      // Skip empty messages
       if (!message) return null;
       
       return [
-        row[0] || "",     // Date/Time
-        row[1] || "",     // From Number
-        row[2] || "",     // To Number  
+        row[0] || "",     // Date
+        row[1] || "",     // From
+        row[2] || "",     // To
         row[3] || "",     // Client
-        message,          // Clean message
-        "$",              // Currency symbol (like timesms)
-        row[7] || 0       // Status/Cost
+        message,          // Message
+        "$",              // Currency
+        row[7] || 0       // Status
       ];
     })
-    .filter(Boolean);     // Remove null entries
+    .filter(Boolean);
   
   return data;
 }
 
-/* GET NUMBERS - Same pattern */
+/* GET NUMBERS - Fixed sequence */
 async function getNumbers() {
   if (!isLoggedIn) await login();
 
-  // First load numbers page
-  await makeRequest("GET", "/agent/MySMSNumbers", null, {
-    Referer: `${CONFIG.baseUrl}/agent/`
-  });
+  try {
+    // CRITICAL: First visit the MySMSNumbers page
+    console.log("[NUMBERS] Loading MySMSNumbers page...");
+    await makeRequest("GET", "/agent/MySMSNumbers", null, {
+      "Referer": `${CONFIG.baseUrl}/agent/`,
+      "Accept": "text/html"
+    });
 
-  // Build parameters - exactly like timesms but with full params from capture
-  const params = querystring.stringify({
-    frange: "",
-    fclient: "",
-    fnumber: "",
-    sEcho: "2",
-    iColumns: "8",
-    sColumns: ",,,,,,,",
-    iDisplayStart: "0",
-    iDisplayLength: "-1",
-    sSearch: "",
-    bRegex: "false",
-    iSortCol_0: "0",
-    sSortDir_0: "asc",
-    iSortingCols: "1",
-    _: Date.now()
-  });
+    // Small delay to simulate browser behavior
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
-  let data = await makeRequest("GET", `/agent/res/data_smsnumbers.php?${params}`, null, {
-    Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
-    "X-Requested-With": "mark.via.gp"
-  });
+    // Now fetch the data
+    console.log("[NUMBERS] Fetching data...");
+    
+    const params = {
+      frange: "",
+      fclient: "",
+      fnumber: "",
+      sEcho: "2",
+      iColumns: "8",
+      iDisplayStart: "0",
+      iDisplayLength: "-1",
+      sSearch: "",
+      bRegex: "false",
+      iSortCol_0: "0",
+      sSortDir_0: "asc",
+      iSortingCols: "1",
+      _: Date.now()
+    };
 
-  return fixNumbers(safeJSON(data));
+    const queryString = querystring.stringify(params);
+    
+    const data = await makeRequest("GET", `/agent/res/data_smsnumbers.php?${queryString}`, null, {
+      "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+      "Accept": "application/json, text/javascript, */*; q=0.01"
+    }, true); // isAjax = true
+
+    // Check if still getting direct script access
+    if (data.includes("Direct Script Access")) {
+      console.log("[NUMBERS] Direct Script Access - retrying with full sequence...");
+      
+      // Reload everything
+      await login(true);
+      await makeRequest("GET", "/agent/MySMSNumbers", null, {
+        "Referer": `${CONFIG.baseUrl}/agent/`
+      });
+      
+      // Try again
+      const retryData = await makeRequest("GET", `/agent/res/data_smsnumbers.php?${queryString}`, null, {
+        "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+        "Accept": "application/json, text/javascript, */*; q=0.01"
+      }, true);
+      
+      return fixNumbers(safeJSON(retryData));
+    }
+
+    return fixNumbers(safeJSON(data));
+    
+  } catch (error) {
+    console.log("[NUMBERS Error]", error.message);
+    throw error;
+  }
 }
 
-/* GET SMS - Same wide range pattern as timesms */
+/* GET SMS - Fixed sequence */
 async function getSMS() {
   if (!isLoggedIn) await login();
 
-  // Wide date range (your pattern from timesms)
-  const startDate = "2026-01-01";  // Can adjust as needed
-  const endDate = "2099-12-31";
-
-  console.log("[SMS] Wide range:", startDate, "to", endDate);
-
-  // Build URL with parameters
-  const params = [
-    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}`,
-    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}`,
-    `frange=`,
-    `fclient=`,
-    `fnum=`,
-    `fcli=`,
-    `fgdate=`,
-    `fgmonth=`,
-    `fgrange=`,
-    `fgclient=`,
-    `fgnumber=`,
-    `fgcli=`,
-    `fg=0`,
-    `sEcho=2`,
-    `iColumns=9`,
-    `sColumns=,,,,,,,,`,
-    `iDisplayStart=0`,
-    `iDisplayLength=2000`,  // Your suggested value
-    `sSearch=`,
-    `bRegex=false`,
-    `iSortCol_0=0`,
-    `sSortDir_0=desc`,
-    `iSortingCols=1`,
-    `_=${Date.now()}`
-  ].join('&');
-
-  const urlPath = `/agent/res/data_smscdr.php?${params}`;
-
-  console.log("[SMS] Full URL:", CONFIG.baseUrl + urlPath);
-
-  // Load parent page first (like timesms)
   try {
+    // CRITICAL: First visit SMSCDRReports page
+    console.log("[SMS] Loading SMSCDRReports page...");
     await makeRequest("GET", "/agent/SMSCDRReports", null, {
-      Referer: `${CONFIG.baseUrl}/agent/`
+      "Referer": `${CONFIG.baseUrl}/agent/`,
+      "Accept": "text/html"
     });
-    console.log("[SMS] Loaded SMSCDRReports");
-    
-    // Also load stats page (from your capture)
+
+    // Also load stats page (as in your capture)
     await makeRequest("GET", "/agent/SMSCDRStats", null, {
-      Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`
+      "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+      "Accept": "text/html"
     }).catch(() => {});
+
+    // Small delay
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Wide date range
+    const startDate = "2026-01-01";
+    const endDate = "2099-12-31";
+
+    console.log("[SMS] Wide range:", startDate, "to", endDate);
+
+    const params = {
+      fdate1: `${startDate} 00:00:00`,
+      fdate2: `${endDate} 23:59:59`,
+      frange: "",
+      fclient: "",
+      fnum: "",
+      fcli: "",
+      fg: "0",
+      sEcho: "2",
+      iColumns: "9",
+      iDisplayStart: "0",
+      iDisplayLength: "2000",
+      sSearch: "",
+      bRegex: "false",
+      iSortCol_0: "0",
+      sSortDir_0: "desc",
+      iSortingCols: "1",
+      _: Date.now()
+    };
+
+    const queryString = querystring.stringify(params);
     
-  } catch (err) {
-    console.warn("[SMS] Parent page load failed:", err.message);
+    const data = await makeRequest("GET", `/agent/res/data_smscdr.php?${queryString}`, null, {
+      "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+      "Accept": "application/json, text/javascript, */*; q=0.01"
+    }, true);
+
+    // Check for direct script access
+    if (data.includes("Direct Script Access")) {
+      console.log("[SMS] Direct Script Access - retrying...");
+      
+      // Full retry sequence
+      await login(true);
+      await makeRequest("GET", "/agent/SMSCDRReports");
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const retryData = await makeRequest("GET", `/agent/res/data_smscdr.php?${queryString}`, null, {
+        "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+        "Accept": "application/json, text/javascript, */*; q=0.01"
+      }, true);
+      
+      const json = safeJSON(retryData);
+      const result = fixSMS(json);
+      console.log("[SMS] Final count:", result.aaData?.length || 0);
+      return result;
+    }
+
+    const json = safeJSON(data);
+    const result = fixSMS(json);
+    console.log("[SMS] Final count:", result.aaData?.length || 0);
+    return result;
+    
+  } catch (error) {
+    console.log("[SMS Error]", error.message);
+    throw error;
   }
-
-  // Get SMS data
-  let data = await makeRequest("GET", urlPath, null, {
-    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
-    "X-Requested-With": "mark.via.gp",
-    "Accept": "application/json, text/javascript, */*; q=0.01"
-  });
-
-  console.log("[SMS RAW PREVIEW]", data.substring(0, 500));
-
-  // Retry if blocked (like timesms)
-  if (data.includes("Direct Script Access") || 
-      data.includes("Please sign in") || 
-      data.includes("login") ||
-      data.includes("sign-in")) {
-    
-    console.log("[SMS] Blocked - retrying...");
-    await login();
-    
-    // Reload parent page
-    await makeRequest("GET", "/agent/SMSCDRReports", null, {
-      Referer: `${CONFIG.baseUrl}/agent/`
-    });
-    
-    // Retry data fetch
-    data = await makeRequest("GET", urlPath, null, {
-      Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
-      "X-Requested-With": "mark.via.gp"
-    });
-    
-    console.log("[SMS RETRY PREVIEW]", data.substring(0, 500));
-  }
-
-  const json = safeJSON(data);
-  const result = fixSMS(json);
-
-  console.log("[SMS] Final messages count:", result.aaData?.length || 0);
-
-  return result;
 }
 
-/* GET SMS with date range - Optional enhancement */
+/* GET SMS by date */
 async function getSMSByDate(dateFrom, dateTo) {
   if (!isLoggedIn) await login();
 
-  console.log("[SMS] Date range:", dateFrom, "to", dateTo);
+  try {
+    await makeRequest("GET", "/agent/SMSCDRReports", null, {
+      "Referer": `${CONFIG.baseUrl}/agent/`
+    });
 
-  const params = [
-    `fdate1=${encodeURIComponent(dateFrom)}`,
-    `fdate2=${encodeURIComponent(dateTo)}`,
-    `frange=`,
-    `fclient=`,
-    `fnum=`,
-    `fcli=`,
-    `fg=0`,
-    `sEcho=2`,
-    `iColumns=9`,
-    `iDisplayStart=0`,
-    `iDisplayLength=2000`,
-    `iSortCol_0=0`,
-    `sSortDir_0=desc`,
-    `_=${Date.now()}`
-  ].join('&');
+    const params = {
+      fdate1: dateFrom,
+      fdate2: dateTo,
+      frange: "",
+      fclient: "",
+      fnum: "",
+      fcli: "",
+      fg: "0",
+      sEcho: "2",
+      iColumns: "9",
+      iDisplayStart: "0",
+      iDisplayLength: "2000",
+      iSortCol_0: "0",
+      sSortDir_0: "desc",
+      _: Date.now()
+    };
 
-  const urlPath = `/agent/res/data_smscdr.php?${params}`;
+    const queryString = querystring.stringify(params);
+    
+    const data = await makeRequest("GET", `/agent/res/data_smscdr.php?${queryString}`, null, {
+      "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+      "Accept": "application/json, text/javascript, */*; q=0.01"
+    }, true);
 
-  // Load parent page
-  await makeRequest("GET", "/agent/SMSCDRReports", null, {
-    Referer: `${CONFIG.baseUrl}/agent/`
-  }).catch(() => {});
-
-  let data = await makeRequest("GET", urlPath, null, {
-    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
-    "X-Requested-With": "mark.via.gp"
-  });
-
-  const json = safeJSON(data);
-  return fixSMS(json);
+    const json = safeJSON(data);
+    return fixSMS(json);
+    
+  } catch (error) {
+    console.log("[SMS Date Error]", error.message);
+    throw error;
+  }
 }
 
-/* MAIN ROUTE - Same as timesms */
+/* ROUTES */
 router.get("/", async (req, res) => {
   const { type, dateFrom, dateTo } = req.query;
 
   if (!type) {
     return res.json({ 
       error: "Use ?type=numbers or ?type=sms",
-      example: "?type=numbers or ?type=sms or ?type=sms&dateFrom=2026-03-10&dateTo=2026-03-10"
+      example: "?type=numbers or ?type=sms"
     });
   }
 
@@ -388,20 +452,18 @@ router.get("/", async (req, res) => {
       result = await getNumbers();
     } 
     else if (type === "sms") {
-      // Check if date range provided
       if (dateFrom && dateTo) {
         const from = `${dateFrom} 00:00:00`;
         const to = `${dateTo} 23:59:59`;
         result = await getSMSByDate(from, to);
       } else {
-        result = await getSMS(); // Wide range
+        result = await getSMS();
       }
     }
     else {
       return res.json({ error: "Invalid type" });
     }
 
-    // Add metadata
     res.json({
       success: true,
       type: type,
@@ -414,16 +476,19 @@ router.get("/", async (req, res) => {
     res.json({ 
       success: false,
       error: err.message || "Failed",
-      type: type 
+      type: type,
+      note: "Try visiting website manually first to establish session"
     });
   }
 });
 
-/* Status endpoint */
+/* Enhanced status */
 router.get("/status", async (req, res) => {
   res.json({
     loggedIn: isLoggedIn,
     cookies: cookies.length,
+    phpsessid: sessionData.phpsessid,
+    lastActivity: sessionData.lastActivity,
     username: CONFIG.username
   });
 });
@@ -431,10 +496,28 @@ router.get("/status", async (req, res) => {
 /* Force re-login */
 router.post("/relogin", async (req, res) => {
   try {
-    await login();
-    res.json({ success: true, message: "Re-login successful" });
+    await login(true);
+    res.json({ 
+      success: true, 
+      message: "Re-login successful",
+      session: sessionData
+    });
   } catch (err) {
     res.json({ success: false, error: err.message });
+  }
+});
+
+/* Test endpoint */
+router.get("/test", async (req, res) => {
+  try {
+    // Test direct access
+    const test = await makeRequest("GET", "/agent/res/data_smsnumbers.php", null, {}, true);
+    res.json({
+      preview: test.substring(0, 200),
+      includes_block: test.includes("Direct Script Access")
+    });
+  } catch (err) {
+    res.json({ error: err.message });
   }
 });
 
