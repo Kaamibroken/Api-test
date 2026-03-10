@@ -15,218 +15,24 @@ const CONFIG = {
 
 let cookies = [];
 let isLoggedIn = false;
-let lastCaptchaValue = 4;
+let lastCapt = 4; // From your capture
 
-// ============ AUTO-CORRECT CAPTURE SYSTEM ============
-const sitePatterns = {
-  // Login page patterns
-  login: {
-    formAction: ['/signin', '/login', '/auth', '/sign-in'],
-    usernameField: ['username', 'user', 'email', 'login'],
-    passwordField: ['password', 'pass', 'pwd'],
-    captchaField: ['capt', 'captcha', 'code', 'verification'],
-    successIndicator: ['/agent/', 'dashboard', 'SMSDashboard', 'MySMSNumbers']
-  },
-  
-  // Endpoint patterns
-  endpoints: {
-    numbers: ['/agent/res/data_smsnumbers.php', '/agent/api/numbers', '/sms-numbers'],
-    sms: ['/agent/res/data_smscdr.php', '/agent/api/sms', '/sms-records'],
-    dashboard: ['/agent/SMSDashboard', '/agent/', '/dashboard'],
-    reports: ['/agent/SMSCDRReports', '/reports', '/sms-reports']
-  },
-  
-  // Response patterns
-  responseFormats: {
-    datatable: ['aaData', 'data', 'records', 'rows'],
-    total: ['iTotalRecords', 'total', 'count', 'recordsTotal']
-  }
-};
-
-// Capture latest structure
-let capturedStructure = {
-  loginAction: '/signin',
-  captchaField: 'capt',
-  numbersEndpoint: '/agent/res/data_smsnumbers.php',
-  smsEndpoint: '/agent/res/data_smscdr.php',
-  dataTableFormat: {
-    dataKey: 'aaData',
-    totalKey: 'iTotalRecords',
-    displayKey: 'iTotalDisplayRecords'
-  },
-  numberColumns: 8,
-  smsColumns: 9,
-  lastUpdated: null
-};
-
-/* AUTO-DETECT FUNCTION */
-async function detectSiteStructure() {
-  console.log("[AUTO-CAPTURE] Detecting site structure...");
-  
-  try {
-    // Try to access main page
-    const mainPage = await makeRequest("GET", "/", null, {
-      "Accept": "text/html"
-    }).catch(() => "");
-    
-    // Detect login form action
-    const formMatch = mainPage.match(/<form[^>]*action=["']([^"']*)["']/i) ||
-                     mainPage.match(/action=["']([^"']*sign[^"']*)["']/i);
-    if (formMatch && formMatch[1]) {
-      capturedStructure.loginAction = formMatch[1].startsWith('/') ? formMatch[1] : '/' + formMatch[1];
-      console.log(`[AUTO-CAPTURE] Found login action: ${capturedStructure.loginAction}`);
-    }
-    
-    // Detect CAPTCHA field
-    const captchaMatch = mainPage.match(/name=["']([^"']*capt[^"']*)["']/i) ||
-                        mainPage.match(/id=["']([^"']*capt[^"']*)["']/i);
-    if (captchaMatch && captchaMatch[1]) {
-      capturedStructure.captchaField = captchaMatch[1];
-      console.log(`[AUTO-CAPTURE] Found CAPTCHA field: ${capturedStructure.captchaField}`);
-    }
-    
-    // After login, try to detect endpoints
-    if (isLoggedIn) {
-      await detectDataEndpoints();
-    }
-    
-    capturedStructure.lastUpdated = new Date().toISOString();
-    return capturedStructure;
-    
-  } catch (error) {
-    console.log("[AUTO-CAPTURE] Detection error:", error.message);
-    return capturedStructure;
-  }
-}
-
-/* DETECT DATA ENDPOINTS */
-async function detectDataEndpoints() {
-  try {
-    // Try common patterns for numbers endpoint
-    for (const endpoint of sitePatterns.endpoints.numbers) {
-      const test = await makeRequest("GET", endpoint + "?sEcho=1", null, {
-        "X-Requested-With": "XMLHttpRequest"
-      }).catch(() => null);
-      
-      if (test && (test.includes('aaData') || test.includes('{'))) {
-        capturedStructure.numbersEndpoint = endpoint;
-        console.log(`[AUTO-CAPTURE] Numbers endpoint: ${endpoint}`);
-        
-        // Detect column count
-        try {
-          const json = JSON.parse(test);
-          if (json.aaData && json.aaData[0]) {
-            capturedStructure.numberColumns = json.aaData[0].length;
-            console.log(`[AUTO-CAPTURE] Number columns: ${capturedStructure.numberColumns}`);
-          }
-        } catch (e) {}
-        break;
-      }
-    }
-    
-    // Try common patterns for SMS endpoint
-    for (const endpoint of sitePatterns.endpoints.sms) {
-      const test = await makeRequest("GET", endpoint + "?sEcho=1", null, {
-        "X-Requested-With": "XMLHttpRequest"
-      }).catch(() => null);
-      
-      if (test && (test.includes('aaData') || test.includes('{'))) {
-        capturedStructure.smsEndpoint = endpoint;
-        console.log(`[AUTO-CAPTURE] SMS endpoint: ${endpoint}`);
-        
-        // Detect column count
-        try {
-          const json = JSON.parse(test);
-          if (json.aaData && json.aaData[0]) {
-            capturedStructure.smsColumns = json.aaData[0].length;
-            console.log(`[AUTO-CAPTURE] SMS columns: ${capturedStructure.smsColumns}`);
-          }
-        } catch (e) {}
-        break;
-      }
-    }
-    
-    // Detect data format
-    if (capturedStructure.numbersEndpoint) {
-      const test = await makeRequest("GET", capturedStructure.numbersEndpoint + "?sEcho=1", null, {
-        "X-Requested-With": "XMLHttpRequest"
-      }).catch(() => null);
-      
-      if (test) {
-        try {
-          const json = JSON.parse(test);
-          // Find which key contains the data
-          for (const key of sitePatterns.responseFormats.datatable) {
-            if (json[key]) {
-              capturedStructure.dataTableFormat.dataKey = key;
-              break;
-            }
-          }
-          // Find total key
-          for (const key of sitePatterns.responseFormats.total) {
-            if (json[key] !== undefined) {
-              capturedStructure.dataTableFormat.totalKey = key;
-              break;
-            }
-          }
-          console.log(`[AUTO-CAPTURE] Data format: ${JSON.stringify(capturedStructure.dataTableFormat)}`);
-        } catch (e) {}
-      }
-    }
-    
-  } catch (error) {
-    console.log("[AUTO-CAPTURE] Endpoint detection error:", error.message);
-  }
-}
-
-// ============ HELPER FUNCTIONS ============
-
+/* SAFE JSON */
 function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { 
-      error: "Invalid JSON from server", 
-      rawPreview: text?.substring(0, 300) || "Empty response" 
-    };
+    return { error: "Invalid JSON from server", rawPreview: text.substring(0, 300) };
   }
 }
 
-/* DYNAMIC PARAM BUILDER */
-function buildDataTableParams(type, customParams = {}) {
-  const baseParams = {
-    sEcho: customParams.sEcho || "2",
-    iDisplayStart: customParams.start || "0",
-    iDisplayLength: customParams.length || "-1",
-    sSearch: customParams.search || "",
-    bRegex: "false",
-    iSortCol_0: customParams.sortCol || "0",
-    sSortDir_0: customParams.sortDir || "desc",
-    iSortingCols: "1",
-    _: Date.now()
-  };
-  
-  // Add column definitions based on detected structure
-  const columnCount = type === 'numbers' ? capturedStructure.numberColumns : capturedStructure.smsColumns;
-  
-  for (let i = 0; i < columnCount; i++) {
-    baseParams[`mDataProp_${i}`] = i.toString();
-    baseParams[`bSearchable_${i}`] = "true";
-    baseParams[`bSortable_${i}`] = i < columnCount - 1 ? "true" : "false";
-  }
-  
-  baseParams.iColumns = columnCount.toString();
-  baseParams.sColumns = Array(columnCount).fill('').join(',');
-  
-  return { ...baseParams, ...customParams };
-}
-
-// ============ REQUEST FUNCTION ============
-
-function makeRequest(method, path, data = null, extraHeaders = {}, retryCount = 0) {
+/* REQUEST - Same as timesms pattern */
+function makeRequest(method, path, data = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     let cleanPath = path.startsWith('/') ? path : '/' + path;
     const fullUrl = CONFIG.baseUrl + cleanPath;
+    
+    // Parse URL for HTTPS
     const urlObj = new URL(fullUrl);
     const httpModule = urlObj.protocol === 'https:' ? https : http;
 
@@ -234,13 +40,13 @@ function makeRequest(method, path, data = null, extraHeaders = {}, retryCount = 
 
     const headers = {
       "User-Agent": CONFIG.userAgent,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept": "application/json, text/javascript, */*; q=0.01",
       "Accept-Encoding": "gzip, deflate, br",
       "Accept-Language": "en-PK,en;q=0.9",
-      "Cache-Control": "max-age=0",
-      "Connection": "keep-alive",
       "Cookie": cookies.join("; "),
-      "Upgrade-Insecure-Requests": "1",
+      "sec-ch-ua": '"Not:A-Brand";v="99", "Android WebView";v="145", "Chromium";v="145"',
+      "sec-ch-ua-mobile": "?1",
+      "sec-ch-ua-platform": '"Android"',
       ...extraHeaders
     };
 
@@ -256,18 +62,15 @@ function makeRequest(method, path, data = null, extraHeaders = {}, retryCount = 
       method: method,
       headers: headers,
       port: urlObj.protocol === 'https:' ? 443 : 80,
-      rejectUnauthorized: false,
-      timeout: 30000
+      rejectUnauthorized: false
     };
 
     const req = httpModule.request(options, res => {
       // Store cookies
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
-          const cookie = c.split(";")[0];
-          if (!cookies.some(existing => existing.startsWith(cookie.split('=')[0]))) {
-            cookies.push(cookie);
-          }
+          const part = c.split(";")[0];
+          if (!cookies.includes(part)) cookies.push(part);
         });
       }
 
@@ -280,446 +83,358 @@ function makeRequest(method, path, data = null, extraHeaders = {}, retryCount = 
         // Handle compression
         const encoding = res.headers["content-encoding"];
         if (encoding === "gzip") {
-          try { buffer = zlib.gunzipSync(buffer); } catch (e) { }
+          try { buffer = zlib.gunzipSync(buffer); } catch {}
         } else if (encoding === "deflate") {
-          try { buffer = zlib.inflateSync(buffer); } catch (e) { }
+          try { buffer = zlib.inflateSync(buffer); } catch {}
         } else if (encoding === "br") {
-          try { 
-            if (zlib.brotliDecompressSync) {
-              buffer = zlib.brotliDecompressSync(buffer); 
-            }
-          } catch (e) { }
+          try { if (zlib.brotliDecompressSync) buffer = zlib.brotliDecompressSync(buffer); } catch {}
         }
         
-        const responseText = buffer.toString();
-        
-        // Auto-correct on access denied
-        if (responseText.includes("Direct Script Access") || 
-            responseText.includes("Please sign in") ||
-            responseText.includes("login") && retryCount < 2) {
-          console.log("[AUTO-CORRECT] Access denied, re-logging...");
-          login(true).then(() => {
-            // Retry the request with fresh login
-            makeRequest(method, path, data, extraHeaders, retryCount + 1)
-              .then(resolve)
-              .catch(reject);
-          }).catch(reject);
-          return;
-        }
-        
-        resolve(responseText);
+        resolve(buffer.toString());
       });
     });
 
     req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("Request timeout"));
-    });
-    
     if (data) req.write(data);
     req.end();
   });
 }
 
-// ============ LOGIN WITH AUTO-CAPTURE ============
-
-async function login(force = false) {
-  if (isLoggedIn && !force) return true;
-  
+/* LOGIN - Same pattern as timesms */
+async function login() {
   cookies = [];
   isLoggedIn = false;
 
-  try {
-    console.log("[LOGIN] Starting login process...");
-    
-    // Auto-detect structure on first login
-    if (!capturedStructure.lastUpdated) {
-      await detectSiteStructure();
-    }
-    
-    // Get login page
-    const loginPage = await makeRequest("GET", "/sign-in", null, {
-      "Accept": "text/html"
-    });
-    
-    // Auto-detect CAPTCHA if not found
-    let captchaValue = lastCaptchaValue;
-    if (capturedStructure.captchaField === 'capt') {
-      // Try to extract from page
-      const captchaMatch = loginPage.match(/What is (\d+)\s*\+\s*(\d+)/i) ||
-                          loginPage.match(/captcha.*?(\d+).*?(\d+)/i) ||
-                          loginPage.match(new RegExp(capturedStructure.captchaField + '.*?value="?(\\d+)"?', 'i'));
-      
-      if (captchaMatch) {
-        if (captchaMatch[1] && captchaMatch[2]) {
-          captchaValue = Number(captchaMatch[1]) + Number(captchaMatch[2]);
-        } else if (captchaMatch[1]) {
-          captchaValue = captchaMatch[1];
-        }
-      }
-    }
-    
-    console.log(`[LOGIN] Using CAPTCHA: ${captchaValue}`);
-    
-    // Build form data with auto-detected field names
-    const formData = {};
-    formData[capturedStructure.captchaField] = captchaValue;
-    
-    // Try common username/password field names
-    let usernameField = 'username';
-    let passwordField = 'password';
-    
-    // Detect from page
-    const usernameMatch = loginPage.match(/name=["']([^"']*user[^"']*)["']/i);
-    if (usernameMatch) usernameField = usernameMatch[1];
-    
-    const passwordMatch = loginPage.match(/name=["']([^"']*pass[^"']*)["']/i);
-    if (passwordMatch) passwordField = passwordMatch[1];
-    
-    formData[usernameField] = CONFIG.username;
-    formData[passwordField] = CONFIG.password;
-    
-    const formEncoded = querystring.stringify(formData);
+  // Get sign-in page
+  const page = await makeRequest("GET", "/sign-in", null, {
+    "Accept": "text/html"
+  });
 
-    // Submit login
-    const loginResult = await makeRequest("POST", capturedStructure.loginAction, formEncoded, {
-      "Referer": `${CONFIG.baseUrl}/sign-in`,
-      "X-Requested-With": "mark.via.gp"
-    });
-
-    // Verify login
-    const agentPage = await makeRequest("GET", "/agent/", null, {
-      "Referer": `${CONFIG.baseUrl}/sign-in`
-    });
-
-    // Check success indicators
-    let loginSuccess = false;
-    for (const indicator of sitePatterns.login.successIndicator) {
-      if (agentPage.includes(indicator)) {
-        loginSuccess = true;
-        break;
-      }
+  // Extract CAPTCHA - from your capture it was "4"
+  // But if dynamic, try to find
+  let capt = lastCapt;
+  
+  // Try to find CAPTCHA question
+  const match = page.match(/What is (\d+)\s*\+\s*(\d+)/i) ||
+                page.match(/captcha.*?(\d+).*?(\d+)/i) ||
+                page.match(/name="capt".*?value="?(\d+)"?/i);
+  
+  if (match) {
+    if (match[1] && match[2]) {
+      capt = Number(match[1]) + Number(match[2]);
+    } else if (match[1]) {
+      capt = match[1];
     }
-
-    if (loginSuccess) {
-      isLoggedIn = true;
-      lastCaptchaValue = captchaValue;
-      console.log("[LOGIN] Success!");
-      
-      // Auto-detect endpoints after login
-      await detectDataEndpoints();
-      
-      return true;
-    } else {
-      throw new Error("Login failed");
-    }
-  } catch (error) {
-    console.log("[LOGIN] Error:", error.message);
-    isLoggedIn = false;
-    throw error;
   }
+
+  console.log("[LOGIN] Using CAPTCHA:", capt);
+  lastCapt = capt;
+
+  // Submit login form
+  const form = querystring.stringify({
+    username: CONFIG.username,
+    password: CONFIG.password,
+    capt: capt
+  });
+
+  await makeRequest("POST", "/signin", form, {
+    Referer: `${CONFIG.baseUrl}/sign-in`,
+    "X-Requested-With": "mark.via.gp"
+  });
+
+  // Verify login
+  const test = await makeRequest("GET", "/agent/", null, {
+    Referer: `${CONFIG.baseUrl}/sign-in`
+  });
+  
+  if (test.includes("Please sign in") || test.includes("login") || test.includes("sign-in")) {
+    throw new Error("Login failed");
+  }
+
+  isLoggedIn = true;
+  console.log("[LOGIN] Success");
 }
 
-// ============ DATA CLEANING FUNCTIONS ============
-
-function cleanNumbersData(data) {
-  if (!data || !data[capturedStructure.dataTableFormat.dataKey]) return data;
+/* FIX NUMBERS - Same as timesms pattern */
+function fixNumbers(data) {
+  if (!data.aaData) return data;
   
-  const rawData = data[capturedStructure.dataTableFormat.dataKey];
-  const cleaned = [];
+  data.aaData = data.aaData.map(row => [
+    row[1] || "",        // Number
+    "",                  // Empty (like timesms)
+    row[2] || "",        // Client
+    "Weekly",            // Fixed type
+    (row[4] || "").replace(/<[^>]+>/g, "").trim(),  // Status
+    (row[5] || "").replace(/<[^>]+>/g, "").trim()   // Expiry
+  ]);
   
-  for (const row of rawData) {
-    const cleanedRow = {};
-    
-    // Try to intelligently map fields
-    if (Array.isArray(row)) {
-      cleanedRow.id = row[0] || "";
-      cleanedRow.number = row[1] || "";
-      cleanedRow.client = row[2] || "";
-      cleanedRow.type = row[3] || "";
-      cleanedRow.status = (row[4] || "").replace(/<[^>]+>/g, "").trim();
-      cleanedRow.expiry = (row[5] || "").replace(/<[^>]+>/g, "").trim();
-      cleanedRow.sms_count = row[6] || 0;
-      cleanedRow.actions = (row[7] || "").replace(/<[^>]+>/g, "").trim();
-    } else if (typeof row === 'object') {
-      // If it's already an object, just clean HTML
-      Object.keys(row).forEach(key => {
-        if (typeof row[key] === 'string') {
-          cleanedRow[key] = row[key].replace(/<[^>]+>/g, "").trim();
-        } else {
-          cleanedRow[key] = row[key];
-        }
-      });
-    }
-    
-    cleaned.push(cleanedRow);
-  }
-  
-  data[capturedStructure.dataTableFormat.dataKey] = cleaned;
   return data;
 }
 
-function cleanSMSData(data) {
-  if (!data || !data[capturedStructure.dataTableFormat.dataKey]) return data;
+/* FIX SMS - Same as timesms pattern */
+function fixSMS(data) {
+  if (!data.aaData) return data;
   
-  const rawData = data[capturedStructure.dataTableFormat.dataKey];
-  const cleaned = [];
-  
-  for (const row of rawData) {
-    let message = "";
-    let cleanedRow = {};
-    
-    if (Array.isArray(row)) {
-      message = (row[5] || "").replace(/legendhacker/gi, "").trim();
+  data.aaData = data.aaData
+    .map(row => {
+      // Clean message - remove legendhacker
+      let message = (row[5] || "").replace(/legendhacker/gi, "").trim();
       
       // Skip empty messages
-      if (!message) continue;
+      if (!message) return null;
       
-      cleanedRow = {
-        date_time: row[0] || "",
-        from_number: row[1] || "",
-        to_number: row[2] || "",
-        client: row[3] || "",
-        message: message,
-        cost: row[6] || 0,
-        status: (row[7] || "").replace(/<[^>]+>/g, "").trim()
-      };
-    } else if (typeof row === 'object') {
-      // Find message field
-      const messageKey = Object.keys(row).find(k => 
-        String(row[k]).toLowerCase().includes('legendhacker') || 
-        (typeof row[k] === 'string' && row[k].length > 20)
-      );
-      
-      if (messageKey) {
-        message = String(row[messageKey]).replace(/legendhacker/gi, "").trim();
-        if (!message) continue;
-      }
-      
-      // Clean all fields
-      Object.keys(row).forEach(key => {
-        if (typeof row[key] === 'string') {
-          cleanedRow[key] = row[key].replace(/<[^>]+>/g, "").trim();
-        } else {
-          cleanedRow[key] = row[key];
-        }
-      });
-    }
-    
-    cleaned.push(cleanedRow);
-  }
+      return [
+        row[0] || "",     // Date/Time
+        row[1] || "",     // From Number
+        row[2] || "",     // To Number  
+        row[3] || "",     // Client
+        message,          // Clean message
+        "$",              // Currency symbol (like timesms)
+        row[7] || 0       // Status/Cost
+      ];
+    })
+    .filter(Boolean);     // Remove null entries
   
-  data[capturedStructure.dataTableFormat.dataKey] = cleaned;
   return data;
 }
 
-// ============ MAIN API FUNCTIONS ============
-
-async function getSMSNumbers() {
+/* GET NUMBERS - Same pattern */
+async function getNumbers() {
   if (!isLoggedIn) await login();
 
-  try {
-    // Load numbers page
-    await makeRequest("GET", "/agent/MySMSNumbers", null, {
-      "Referer": `${CONFIG.baseUrl}/agent/`
-    });
+  // First load numbers page
+  await makeRequest("GET", "/agent/MySMSNumbers", null, {
+    Referer: `${CONFIG.baseUrl}/agent/`
+  });
 
-    // Build params using auto-detected structure
-    const params = buildDataTableParams('numbers', {
-      frange: "",
-      fclient: "",
-      fnumber: ""
-    });
+  // Build parameters - exactly like timesms but with full params from capture
+  const params = querystring.stringify({
+    frange: "",
+    fclient: "",
+    fnumber: "",
+    sEcho: "2",
+    iColumns: "8",
+    sColumns: ",,,,,,,",
+    iDisplayStart: "0",
+    iDisplayLength: "-1",
+    sSearch: "",
+    bRegex: "false",
+    iSortCol_0: "0",
+    sSortDir_0: "asc",
+    iSortingCols: "1",
+    _: Date.now()
+  });
 
-    const queryString = querystring.stringify(params);
-    
-    const data = await makeRequest("GET", `${capturedStructure.numbersEndpoint}?${queryString}`, null, {
-      "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
-      "X-Requested-With": "mark.via.gp",
-      "Accept": "application/json, text/javascript, */*; q=0.01"
-    });
+  let data = await makeRequest("GET", `/agent/res/data_smsnumbers.php?${params}`, null, {
+    Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+    "X-Requested-With": "mark.via.gp"
+  });
 
-    return cleanNumbersData(safeJSON(data));
-  } catch (error) {
-    console.log("[Numbers Error]", error.message);
-    throw error;
-  }
+  return fixNumbers(safeJSON(data));
 }
 
-async function getSMSRecords(dateFrom = null, dateTo = null, filters = {}) {
+/* GET SMS - Same wide range pattern as timesms */
+async function getSMS() {
   if (!isLoggedIn) await login();
 
+  // Wide date range (your pattern from timesms)
+  const startDate = "2026-01-01";  // Can adjust as needed
+  const endDate = "2099-12-31";
+
+  console.log("[SMS] Wide range:", startDate, "to", endDate);
+
+  // Build URL with parameters
+  const params = [
+    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}`,
+    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}`,
+    `frange=`,
+    `fclient=`,
+    `fnum=`,
+    `fcli=`,
+    `fgdate=`,
+    `fgmonth=`,
+    `fgrange=`,
+    `fgclient=`,
+    `fgnumber=`,
+    `fgcli=`,
+    `fg=0`,
+    `sEcho=2`,
+    `iColumns=9`,
+    `sColumns=,,,,,,,,`,
+    `iDisplayStart=0`,
+    `iDisplayLength=2000`,  // Your suggested value
+    `sSearch=`,
+    `bRegex=false`,
+    `iSortCol_0=0`,
+    `sSortDir_0=desc`,
+    `iSortingCols=1`,
+    `_=${Date.now()}`
+  ].join('&');
+
+  const urlPath = `/agent/res/data_smscdr.php?${params}`;
+
+  console.log("[SMS] Full URL:", CONFIG.baseUrl + urlPath);
+
+  // Load parent page first (like timesms)
   try {
-    // Default to today
-    const today = new Date();
-    const defaultDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    
-    const fdate1 = dateFrom || `${defaultDate} 00:00:00`;
-    const fdate2 = dateTo || `${defaultDate} 23:59:59`;
-
-    console.log(`[SMS] Fetching from ${fdate1} to ${fdate2}`);
-
-    // Load reports page
     await makeRequest("GET", "/agent/SMSCDRReports", null, {
-      "Referer": `${CONFIG.baseUrl}/agent/`
+      Referer: `${CONFIG.baseUrl}/agent/`
     });
-
-    // Build params with filters
-    const params = buildDataTableParams('sms', {
-      fdate1: fdate1,
-      fdate2: fdate2,
-      frange: filters.range || "",
-      fclient: filters.client || "",
-      fnum: filters.number || "",
-      fcli: filters.cli || "",
-      fg: "0",
-      ...filters
-    });
-
-    const queryString = querystring.stringify(params);
+    console.log("[SMS] Loaded SMSCDRReports");
     
-    const data = await makeRequest("GET", `${capturedStructure.smsEndpoint}?${queryString}`, null, {
-      "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
-      "X-Requested-With": "mark.via.gp",
-      "Accept": "application/json, text/javascript, */*; q=0.01"
-    });
-
-    return cleanSMSData(safeJSON(data));
-  } catch (error) {
-    console.log("[SMS Error]", error.message);
-    throw error;
+    // Also load stats page (from your capture)
+    await makeRequest("GET", "/agent/SMSCDRStats", null, {
+      Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`
+    }).catch(() => {});
+    
+  } catch (err) {
+    console.warn("[SMS] Parent page load failed:", err.message);
   }
+
+  // Get SMS data
+  let data = await makeRequest("GET", urlPath, null, {
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+    "X-Requested-With": "mark.via.gp",
+    "Accept": "application/json, text/javascript, */*; q=0.01"
+  });
+
+  console.log("[SMS RAW PREVIEW]", data.substring(0, 500));
+
+  // Retry if blocked (like timesms)
+  if (data.includes("Direct Script Access") || 
+      data.includes("Please sign in") || 
+      data.includes("login") ||
+      data.includes("sign-in")) {
+    
+    console.log("[SMS] Blocked - retrying...");
+    await login();
+    
+    // Reload parent page
+    await makeRequest("GET", "/agent/SMSCDRReports", null, {
+      Referer: `${CONFIG.baseUrl}/agent/`
+    });
+    
+    // Retry data fetch
+    data = await makeRequest("GET", urlPath, null, {
+      Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+      "X-Requested-With": "mark.via.gp"
+    });
+    
+    console.log("[SMS RETRY PREVIEW]", data.substring(0, 500));
+  }
+
+  const json = safeJSON(data);
+  const result = fixSMS(json);
+
+  console.log("[SMS] Final messages count:", result.aaData?.length || 0);
+
+  return result;
 }
 
-// ============ EXPRESS ROUTES ============
+/* GET SMS with date range - Optional enhancement */
+async function getSMSByDate(dateFrom, dateTo) {
+  if (!isLoggedIn) await login();
 
-/* Main API endpoint */
+  console.log("[SMS] Date range:", dateFrom, "to", dateTo);
+
+  const params = [
+    `fdate1=${encodeURIComponent(dateFrom)}`,
+    `fdate2=${encodeURIComponent(dateTo)}`,
+    `frange=`,
+    `fclient=`,
+    `fnum=`,
+    `fcli=`,
+    `fg=0`,
+    `sEcho=2`,
+    `iColumns=9`,
+    `iDisplayStart=0`,
+    `iDisplayLength=2000`,
+    `iSortCol_0=0`,
+    `sSortDir_0=desc`,
+    `_=${Date.now()}`
+  ].join('&');
+
+  const urlPath = `/agent/res/data_smscdr.php?${params}`;
+
+  // Load parent page
+  await makeRequest("GET", "/agent/SMSCDRReports", null, {
+    Referer: `${CONFIG.baseUrl}/agent/`
+  }).catch(() => {});
+
+  let data = await makeRequest("GET", urlPath, null, {
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+    "X-Requested-With": "mark.via.gp"
+  });
+
+  const json = safeJSON(data);
+  return fixSMS(json);
+}
+
+/* MAIN ROUTE - Same as timesms */
 router.get("/", async (req, res) => {
-  const { 
-    type, 
-    dateFrom, 
-    dateTo,
-    client,
-    number,
-    cli,
-    start,
-    length 
-  } = req.query;
+  const { type, dateFrom, dateTo } = req.query;
 
   if (!type) {
     return res.json({ 
-      success: false,
-      error: "Specify type",
-      available: ["numbers", "sms", "reports", "stats", "structure"],
-      example: "?type=numbers",
-      auto_captured: capturedStructure,
-      timestamp: new Date().toISOString()
+      error: "Use ?type=numbers or ?type=sms",
+      example: "?type=numbers or ?type=sms or ?type=sms&dateFrom=2026-03-10&dateTo=2026-03-10"
     });
   }
 
   try {
-    if (!isLoggedIn) {
-      await login();
-    }
-
     let result;
-    let metadata = {
-      type: type,
-      captured_structure: capturedStructure,
-      auto_corrected: true
-    };
-
-    switch(type) {
-      case "numbers":
-        result = await getSMSNumbers();
-        metadata.count = result[capturedStructure.dataTableFormat.dataKey]?.length || 0;
-        break;
-        
-      case "sms":
-        result = await getSMSRecords(
-          dateFrom ? `${dateFrom} 00:00:00` : null,
-          dateTo ? `${dateTo} 23:59:59` : null,
-          { client, number, cli }
-        );
-        metadata.count = result[capturedStructure.dataTableFormat.dataKey]?.length || 0;
-        break;
-        
-      case "reports":
-        // Get reports page HTML
-        result = await makeRequest("GET", "/agent/SMSCDRReports");
-        metadata.type = "html";
-        break;
-        
-      case "stats":
-        result = await makeRequest("GET", "/agent/SMSCDRStats");
-        metadata.type = "html";
-        break;
-        
-      case "structure":
-        // Force re-detect structure
-        await detectSiteStructure();
-        result = capturedStructure;
-        break;
-        
-      default:
-        return res.json({ error: "Invalid type" });
+    
+    if (type === "numbers") {
+      result = await getNumbers();
+    } 
+    else if (type === "sms") {
+      // Check if date range provided
+      if (dateFrom && dateTo) {
+        const from = `${dateFrom} 00:00:00`;
+        const to = `${dateTo} 23:59:59`;
+        result = await getSMSByDate(from, to);
+      } else {
+        result = await getSMS(); // Wide range
+      }
+    }
+    else {
+      return res.json({ error: "Invalid type" });
     }
 
+    // Add metadata
     res.json({
       success: true,
-      ...metadata,
-      data: result,
-      timestamp: new Date().toISOString()
+      type: type,
+      count: result.aaData?.length || 0,
+      data: result
     });
 
-  } catch (error) {
-    console.error("[API Error]", error);
+  } catch (err) {
+    console.error("[ERROR]", err.message);
     res.json({ 
       success: false,
-      error: error.message || "Failed to fetch data",
-      type: type,
-      auto_correct_suggestion: "Try ?type=structure to re-detect"
+      error: err.message || "Failed",
+      type: type 
     });
   }
 });
 
-/* Manual capture update */
-router.post("/capture", async (req, res) => {
-  try {
-    const newStructure = await detectSiteStructure();
-    res.json({
-      success: true,
-      message: "Structure re-captured",
-      structure: newStructure
-    });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
-});
-
-/* Login status */
+/* Status endpoint */
 router.get("/status", async (req, res) => {
   res.json({
     loggedIn: isLoggedIn,
     cookies: cookies.length,
-    username: CONFIG.username,
-    baseUrl: CONFIG.baseUrl,
-    captured_structure: capturedStructure
+    username: CONFIG.username
   });
 });
 
 /* Force re-login */
 router.post("/relogin", async (req, res) => {
   try {
-    await login(true);
-    res.json({ 
-      success: true, 
-      message: "Re-login successful",
-      structure: capturedStructure
-    });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
+    await login();
+    res.json({ success: true, message: "Re-login successful" });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
   }
 });
 
