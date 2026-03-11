@@ -193,8 +193,8 @@ function fixNumbers(data) {
   data.aaData = data.aaData.map(row => {
     return [
       row[1] || "",
-      row[3] || "",
       "Active",
+      row[3] || "",
       "Weekly",
       (row[4] || "").replace(/<[^>]+>/g, "").trim(),
       (row[6] || "0.00").toString()
