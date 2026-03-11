@@ -1,5 +1,5 @@
 const express = require("express");
-const https = require("https");          // Changed to https
+const https = require("https");
 const zlib = require("zlib");
 const querystring = require("querystring");
 
@@ -24,7 +24,7 @@ function safeJSON(text) {
   }
 }
 
-/* REQUEST (now supports HTTPS) */
+/* REQUEST */
 function makeRequest(method, path, postData = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     let cleanPath = path.startsWith('/') ? path : '/' + path;
@@ -50,7 +50,6 @@ function makeRequest(method, path, postData = null, extraHeaders = {}) {
     }
 
     const req = https.request(fullUrl, { method, headers }, (res) => {
-      // Update cookies
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
           const part = c.split(";")[0].trim();
@@ -65,7 +64,7 @@ function makeRequest(method, path, postData = null, extraHeaders = {}) {
         let buffer = Buffer.concat(chunks);
         if (res.headers["content-encoding"] === "gzip" || res.headers["content-encoding"] === "br") {
           try {
-            buffer = zlib.gunzipSync(buffer); // br ke liye bhi gunzip try (simple cases)
+            buffer = zlib.gunzipSync(buffer);
           } catch {}
         }
         resolve(buffer.toString("utf-8"));
@@ -85,7 +84,6 @@ async function login() {
 
   const loginPage = await makeRequest("GET", "/sign-in");
 
-  // Find "What is X + Y = ?"
   const captMatch = loginPage.match(/What is\s*(\d+)\s*\+\s*(\d+)\s*=?\s*\??/i);
   const capt = captMatch ? Number(captMatch[1]) + Number(captMatch[2]) : 10;
 
@@ -99,10 +97,9 @@ async function login() {
 
   await makeRequest("POST", "/signin", formData, {
     "Referer": `${CONFIG.baseUrl}/sign-in`,
-    "X-Requested-With": "mark.via.gp"  // tumhara original header
+    "X-Requested-With": "mark.via.gp"
   });
 
-  // Verify
   const dashboard = await makeRequest("GET", "/agent/");
   if (dashboard.includes("Please sign in") || dashboard.includes("sign-in")) {
     throw new Error("Login failed - still on login page");
@@ -112,39 +109,38 @@ async function login() {
   console.log("[LOGIN] Success");
 }
 
-/* FIX SMS (rearrange to message @5, client @6) */
+/* FIX SMS */
 function fixSMS(data) {
   if (!data?.aaData) return data;
 
   data.aaData = data.aaData.map(row => {
-    // Original likely: [time?, number, source?, ?, message/fallback, client?, cost?, status?]
     let message = (row[4] || row[5] || "").trim();
     let client  = row[5] || row[6] || "";
 
     if (!message) return null;
 
     return [
-      row[0] || "",   // 0
-      row[1] || "",   // 1 time/date
-      row[2] || "",   // 2 number
-      row[3] || "",   // 3 source
-      "",             // 4 empty (legacy fallback)
-      message,        // 5 MESSAGE
-      client,         // 6 CLIENT
-      row[7] || "0",  // 7 cost
-      row[8] || ""    // 8 status
+      row[0] || "",
+      row[1] || "",
+      row[2] || "",
+      row[3] || "",
+      "",
+      message,
+      client,
+      row[7] || "0",
+      row[8] || ""
     ];
   }).filter(Boolean);
 
   return data;
 }
 
-/* GET SMS (SMSCDR) */
+/* GET SMS */
 async function getSMS() {
   if (!isLoggedIn) await login();
 
   const start = "2026-03-01 00:00:00";
-  const end   = "2026-12-31 23:59:59";  // Adjust wider if needed
+  const end   = "2026-12-31 23:59:59";
 
   const params = querystring.stringify({
     fdate1: start,
@@ -163,13 +159,12 @@ async function getSMS() {
     sEcho: "2",
     iColumns: "9",
     iDisplayStart: "0",
-    iDisplayLength: "-1",   // All records
+    iDisplayLength: "-1",
     _: Date.now()
   });
 
   const apiUrl = `/agent/res/data_smscdr.php?${params}`;
 
-  // Pre-load page (some sites need it)
   await makeRequest("GET", "/agent/SMSCDRReports").catch(() => {});
 
   let raw = await makeRequest("GET", apiUrl, null, {
@@ -191,21 +186,91 @@ async function getSMS() {
   return fixSMS(json);
 }
 
-/* ROUTE */
+/* FIX NUMBERS */
+function fixNumbers(data) {
+  if (!data?.aaData) return data;
+
+  data.aaData = data.aaData.map(row => {
+    return [
+      row[1] || "",
+      row[3] || "",
+      "Active",
+      "Weekly",
+      (row[4] || "").replace(/<[^>]+>/g, "").trim(),
+      (row[6] || "0.00").toString()
+    ];
+  });
+
+  console.log(`[Numbers] Fixed ${data.aaData.length} entries`);
+  return data;
+}
+
+/* GET NUMBERS */
+async function getNumbers() {
+  if (!isLoggedIn) await login();
+
+  const params = querystring.stringify({
+    frange: "",
+    fclient: "",
+    fnumber: "",
+    sEcho: "2",
+    iColumns: "8",
+    iDisplayStart: "0",
+    iDisplayLength: "-1",
+    mDataProp_0: "0",
+    bSortable_0: "false",
+    iSortCol_0: "0",
+    sSortDir_0: "asc",
+    _: Date.now().toString()
+  });
+
+  const apiUrl = `/agent/res/data_smsnumbers.php?${params}`;
+
+  await makeRequest("GET", "/agent/MySMSNumbers").catch(() => {
+    console.warn("[PRELOAD] MySMSNumbers page failed");
+  });
+
+  let raw = await makeRequest("GET", apiUrl, null, {
+    "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/javascript, */*; q=0.01"
+  });
+
+  if (raw.includes("Direct Script Access") || raw.includes("sign-in") || raw.includes("Please sign in")) {
+    console.log("[RETRY Numbers] Relogging...");
+    await login();
+    await makeRequest("GET", "/agent/MySMSNumbers");
+    raw = await makeRequest("GET", apiUrl, null, {
+      "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+      "X-Requested-With": "XMLHttpRequest"
+    });
+  }
+
+  const json = safeJSON(raw);
+  return fixNumbers(json);
+}
+
+/* MAIN ROUTE */
 router.get("/", async (req, res) => {
   const { type } = req.query;
 
-  if (!type) return res.json({ error: "Use ?type=sms" });
+  if (!type) {
+    return res.json({ error: "Use ?type=numbers or ?type=sms" });
+  }
 
   try {
     if (type === "sms") {
       const result = await getSMS();
       return res.json(result);
     }
-    res.json({ error: "Invalid type" });
+    if (type === "numbers") {
+      const result = await getNumbers();
+      return res.json(result);
+    }
+    return res.json({ error: "Invalid type. Use numbers or sms" });
   } catch (err) {
-    console.error(err);
-    res.json({ error: err.message || "Failed" });
+    console.error("[API ERROR]", err.message || err);
+    res.status(500).json({ error: err.message || "Operation failed" });
   }
 });
 
