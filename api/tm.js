@@ -290,8 +290,13 @@ router.get('/', async (req, res) => {
             return res.status(503).json({ error: "Session was expired. Please retry request." });
         }
 
+        let result = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+
+        if (type === 'numbers') result = fixNumbers(result);
+        if (type === 'sms')     result = fixSMS(result);
+
         res.set('Content-Type', 'application/json');
-        res.send(response.data);
+        res.json(result);
 
     } catch (e) {
         if (e.response?.status === 403) {
@@ -310,3 +315,46 @@ module.exports = router;
 
 // --- INITIAL LOGIN (startup pe) ---
 performLogin().catch(e => console.error("Initial login error:", e.message));
+
+/* ================= FIX NUMBERS ================= */
+function fixNumbers(data) {
+  if (!data.aaData) return data;
+
+  data.aaData = data.aaData.map(row => [
+    row[1],
+    "",
+    row[3],
+    "Weekly",
+    (row[4] || "").replace(/<[^>]+>/g, "").trim(),
+    (row[7] || "").replace(/<[^>]+>/g, "").trim()
+  ]);
+
+  return data;
+}
+
+/* ================= FIX SMS (FINAL CORRECT) ================= */
+function fixSMS(data) {
+  if (!data.aaData) return data;
+
+  data.aaData = data.aaData
+    .map(row => {
+      let message = (row[5] || "")
+        .replace(/kamibroken/gi, "")
+        .trim();
+
+      if (!message) return null;
+
+      return [
+        row[0], // date
+        row[1], // range
+        row[2], // number
+        row[3], // service
+        message, // OTP MESSAGE
+        "$",
+        row[7] || 0
+      ];
+    })
+    .filter(Boolean);
+
+  return data;
+}
