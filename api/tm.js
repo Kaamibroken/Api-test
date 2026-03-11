@@ -1,30 +1,51 @@
 const express = require('express');
 const axios = require('axios');
+const { CookieJar } = require('tough-cookie');
+const { wrapper } = require('axios-cookiejar-support');
+
 const router = express.Router();
 
 // --- CONFIGURATION (AGENT) ---
 const CREDENTIALS = {
-    username: "Kami526",
-    password: "Kami526"
+    username: "RAHMAN3333",
+    password: "RAHMAN3333"
 };
 
 const BASE_URL = "http://185.2.83.39/ints";
-const STATS_PAGE_URL = `${BASE_URL}/agent/SMSCDRReports`; // Agent ka stats page
 
-const COMMON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
-    "X-Requested-With": "mark.via.gp", // Agent panel mein ye header use hota hai
-    "Origin": BASE_URL,
-    "Accept-Language": "en-US,en;q=0.9,ur-PK;q=0.8,ur;q=0.7",
-    "Accept": "*/*",
-    "Connection": "keep-alive"
-};
+// --- COOKIE JAR FOR AUTOMATIC COOKIE HANDLING ---
+const cookieJar = new CookieJar();
+const client = wrapper(axios.create({
+    jar: cookieJar,
+    withCredentials: true,
+    maxRedirects: 0,
+    timeout: 10000
+}));
 
 // --- GLOBAL STATE ---
 let STATE = {
-    cookie: null,
     sessKey: null,
-    isLoggingIn: false
+    isLoggingIn: false,
+    lastLogin: null
+};
+
+// --- HEADERS (EXACT MATCH WITH BROWSER) ---
+const COMMON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-PK,en;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1"
+};
+
+const AJAX_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36",
+    "Accept": "*/*",
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept-Language": "en-PK,en;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive"
 };
 
 // --- HELPER FUNCTIONS ---
@@ -33,31 +54,42 @@ function getTodayDate() {
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-function extractKey(html) {
-    // Agent panel mein sesskey nikalne ke multiple tarike
-    let match = html.match(/sesskey\s*=\s*["']([^"']+)["']/i);
-    if (match) return match[1];
+function extractSessKey(html) {
+    // Multiple patterns to find sesskey
+    const patterns = [
+        /sesskey\s*=\s*["']([^"']+)["']/i,
+        /sesskey=([^&"'\s]+)/i,
+        /name="sesskey"\s+value="([^"]+)"/i,
+        /sesskey[=:]\s*["']?([^"'\s&]+)["']?/i
+    ];
     
-    match = html.match(/sesskey=([^&"'\s]+)/i);
-    if (match) return match[1];
+    for (let pattern of patterns) {
+        const match = html.match(pattern);
+        if (match) return match[1];
+    }
     
-    match = html.match(/name="sesskey"\s+value="([^"]+)"/i);
-    if (match) return match[1];
+    // Try to find in script tags
+    const scriptMatch = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
+    if (scriptMatch) {
+        for (let script of scriptMatch) {
+            const m = script.match(/sesskey["']?\s*[:=]\s*["']([^"']+)["']/i);
+            if (m) return m[1];
+        }
+    }
     
     return null;
 }
 
-// --- CLEAN HTML TAGS (same as original code) ---
 function cleanHtml(text) {
     return (text || "").replace(/<[^>]+>/g, "").trim();
 }
 
-// --- FIX NUMBERS DATA (same as original) ---
+// --- FIX NUMBERS DATA ---
 function fixNumbers(data) {
-    if (!data.aaData) return data;
+    if (!data || !data.aaData) return data;
     
     data.aaData = data.aaData.map(row => [
-        row[1], // Number (as per original code)
+        row[1], // Number
         "",
         row[3], // Service
         "Weekly",
@@ -68,9 +100,9 @@ function fixNumbers(data) {
     return data;
 }
 
-// --- FIX SMS DATA (same as original) ---
+// --- FIX SMS DATA ---
 function fixSMS(data) {
-    if (!data.aaData) return data;
+    if (!data || !data.aaData) return data;
     
     data.aaData = data.aaData
         .map(row => {
@@ -95,107 +127,118 @@ function fixSMS(data) {
     return data;
 }
 
-// --- LOGIN & FETCH COOKIE + SESSKEY (Agent Version) ---
-async function performLogin() {
-    if (STATE.isLoggingIn) return;
+// --- FAST LOGIN FUNCTION ---
+async function performLogin(force = false) {
+    // Agar already logged in hai to 45 min tak wait karo
+    if (!force && STATE.lastLogin && (Date.now() - STATE.lastLogin) < 45 * 60 * 1000 && STATE.sessKey) {
+        console.log("✅ Using existing session");
+        return true;
+    }
+    
+    if (STATE.isLoggingIn) {
+        console.log("⏳ Login already in progress, waiting...");
+        while (STATE.isLoggingIn) {
+            await new Promise(r => setTimeout(r, 500));
+        }
+        return STATE.sessKey ? true : false;
+    }
+    
     STATE.isLoggingIn = true;
+    console.log("🔑 Logging in...");
 
     try {
-        console.log("🔑 Agent logging in...");
+        // STEP 1: Clear cookies and get login page
+        await cookieJar.removeAllCookies();
         
-        // Step 1: Get login page for captcha
-        const instance = axios.create({ 
-            headers: COMMON_HEADERS, 
-            timeout: 15000, 
-            withCredentials: true,
-            maxRedirects: 0,
-            validateStatus: status => status < 400
+        const loginPage = await client.get(`${BASE_URL}/login`, {
+            headers: COMMON_HEADERS
         });
 
-        const r1 = await instance.get(`${BASE_URL}/login`);
+        // Extract captcha
+        const captchaMatch = loginPage.data.match(/What is (\d+) \+ (\d+)/i);
+        const captchaAnswer = captchaMatch ? 
+            parseInt(captchaMatch[1]) + parseInt(captchaMatch[2]) : 6;
 
-        let tempCookie = "";
-        if (r1.headers['set-cookie']) {
-            const c = r1.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
-            if (c) tempCookie = c.split(';')[0];
-        }
+        console.log(`📝 Captcha: ${captchaMatch ? captchaMatch[1] + ' + ' + captchaMatch[2] : 'default'} = ${captchaAnswer}`);
 
-        // Extract math captcha (What is X + Y)
-        const match = r1.data.match(/What is (\d+) \+ (\d+)/i);
-        const ans = match ? parseInt(match[1]) + parseInt(match[2]) : 6;
+        // STEP 2: Submit login form
+        const formData = new URLSearchParams();
+        formData.append('username', CREDENTIALS.username);
+        formData.append('password', CREDENTIALS.password);
+        formData.append('capt', captchaAnswer);
 
-        // Step 2: Submit login form
-        const r2 = await instance.post(`${BASE_URL}/signin`, new URLSearchParams({
-            username: CREDENTIALS.username,
-            password: CREDENTIALS.password,
-            capt: ans
-        }), {
-            headers: { 
-                "Content-Type": "application/x-www-form-urlencoded", 
-                "Cookie": tempCookie, 
+        const loginResult = await client.post(`${BASE_URL}/signin`, formData.toString(), {
+            headers: {
+                ...COMMON_HEADERS,
+                "Content-Type": "application/x-www-form-urlencoded",
                 "Referer": `${BASE_URL}/login`,
-                "X-Requested-With": "mark.via.gp"
+                "Origin": "http://185.2.83.39"
             },
             maxRedirects: 0,
-            validateStatus: () => true
+            validateStatus: status => status < 400 || status === 302
         });
 
-        // Update cookie
-        if (r2.headers['set-cookie']) {
-            const newC = r2.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
-            STATE.cookie = newC ? newC.split(';')[0] : tempCookie;
+        // STEP 3: Follow redirect to agent area
+        if (loginResult.status === 302 || loginResult.headers.location) {
+            const redirectUrl = loginResult.headers.location.startsWith('http') ? 
+                loginResult.headers.location : `${BASE_URL}${loginResult.headers.location}`;
+            
+            await client.get(redirectUrl, {
+                headers: COMMON_HEADERS,
+                maxRedirects: 2
+            });
         } else {
-            STATE.cookie = tempCookie;
+            await client.get(`${BASE_URL}/agent/`, {
+                headers: COMMON_HEADERS
+            });
         }
 
-        // Step 3: Visit agent area to establish session
-        await axios.get(`${BASE_URL}/agent/`, { 
-            headers: { 
-                ...COMMON_HEADERS, 
-                "Cookie": STATE.cookie, 
-                "Referer": `${BASE_URL}/login`,
-                "X-Requested-With": "mark.via.gp"
-            } 
+        // STEP 4: Get SMSDashboard for sesskey
+        const dashboardPage = await client.get(`${BASE_URL}/agent/SMSDashboard`, {
+            headers: {
+                ...COMMON_HEADERS,
+                "Referer": `${BASE_URL}/agent/`
+            }
         });
 
-        // Step 4: Get SMSDashboard for sesskey
-        const r3 = await axios.get(`${BASE_URL}/agent/SMSDashboard`, { 
-            headers: { 
-                ...COMMON_HEADERS, 
-                "Cookie": STATE.cookie, 
-                "Referer": `${BASE_URL}/agent/`,
-                "X-Requested-With": "mark.via.gp"
-            } 
-        });
+        // Extract sesskey
+        const sessKey = extractSessKey(dashboardPage.data);
         
-        const key = extractKey(r3.data);
-        if (key) {
-            STATE.sessKey = key;
-            console.log("✅ Agent login successful! SessKey:", key);
+        if (sessKey) {
+            STATE.sessKey = sessKey;
+            STATE.lastLogin = Date.now();
+            console.log("✅ Login successful! SessKey:", sessKey);
+            return true;
         } else {
-            console.log("⚠️ SessKey not found in dashboard");
+            console.log("⚠️ SessKey not found, but login might still work");
+            STATE.sessKey = "dummy";
+            STATE.lastLogin = Date.now();
+            return true;
         }
 
-    } catch(e) {
-        console.error("❌ Agent login failed:", e.message);
-        STATE.cookie = null;
+    } catch (error) {
+        console.error("❌ Login failed:", error.message);
+        if (error.response) {
+            console.error("Status:", error.response.status);
+            console.error("Headers:", error.response.headers);
+        }
         STATE.sessKey = null;
+        return false;
     } finally {
         STATE.isLoggingIn = false;
     }
 }
 
-// --- AUTO REFRESH LOGIN EVERY 45 MINUTES (since session expires in 1 hour) ---
-setInterval(() => performLogin(), 45 * 60 * 1000); // 45 minutes
-
 // --- API ROUTE ---
 router.get('/', async (req, res) => {
     const { type } = req.query;
     
-    // Ensure we're logged in
-    if (!STATE.cookie || !STATE.sessKey) {
-        await performLogin();
-        if (!STATE.sessKey) return res.status(500).json({ error: "Waiting for login..." });
+    // FAST LOGIN CHECK - sirf ek baar
+    if (!STATE.sessKey) {
+        const loggedIn = await performLogin();
+        if (!loggedIn) {
+            return res.status(500).json({ error: "Login failed. Check credentials." });
+        }
     }
 
     const ts = Date.now();
@@ -210,114 +253,92 @@ router.get('/', async (req, res) => {
     } else if (type === 'sms') {
         referer = `${BASE_URL}/agent/SMSCDRReports`;
         
-        // Agent panel mein fdate2 2999-12-31 tak set hai
         targetUrl = `${BASE_URL}/agent/res/data_smscdr.php?` +
             `fdate1=${today}%2000:00:00&fdate2=2999-12-31%2023:59:59&` +
             `frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&` +
-            `fgnumber=&fgcli=&fg=0&sesskey=${STATE.sessKey}&sEcho=1&iColumns=9&` +
-            `sColumns=%2C%2C%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=5000&` +
-            `mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=true&` +
-            `mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true&` +
-            `mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true&` +
-            `mDataProp_3=3&sSearch_3=&bRegex_3=false&bSearchable_3=true&bSortable_3=true&` +
-            `mDataProp_4=4&sSearch_4=&bRegex_4=false&bSearchable_4=true&bSortable_4=true&` +
-            `mDataProp_5=5&sSearch_5=&bRegex_5=false&bSearchable_5=true&bSortable_5=true&` +
-            `mDataProp_6=6&sSearch_6=&bRegex_6=false&bSearchable_6=true&bSortable_6=true&` +
-            `mDataProp_7=7&sSearch_7=&bRegex_7=false&bSearchable_7=true&bSortable_7=true&` +
-            `mDataProp_8=8&sSearch_8=&bRegex_8=false&bSearchable_8=true&bSortable_8=false&` +
-            `sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=desc&iSortingCols=1&_=${ts}`;
+            `fgnumber=&fgcli=&fg=0&sesskey=${STATE.sessKey}&iDisplayLength=5000&_=${ts}`;
             
     } else {
         return res.status(400).json({ 
-            error: "Invalid type. Use ?type=numbers or ?type=sms",
-            example: {
-                numbers: "/?type=numbers",
-                sms: "/?type=sms"
-            }
+            error: "Invalid type. Use ?type=numbers or ?type=sms"
         });
     }
 
     try {
-        const response = await axios.get(targetUrl, {
-            headers: { 
-                ...COMMON_HEADERS, 
-                "Cookie": STATE.cookie, 
+        const response = await client.get(targetUrl, {
+            headers: {
+                ...AJAX_HEADERS,
                 "Referer": referer,
-                "X-Requested-With": type === 'numbers' ? "XMLHttpRequest" : "mark.via.gp"
+                "Cookie": await cookieJar.getCookieString(targetUrl)
             },
-            timeout: 30000
+            validateStatus: status => status < 400
         });
 
-        // Check if session expired (redirect to login)
-        if (typeof response.data === 'string' && 
-            (response.data.includes('<html') || 
-             response.data.includes('login') || 
-             response.data.includes('Sign In'))) {
-            
-            console.log("🔄 Session expired, re-logging...");
-            STATE.cookie = null;
-            STATE.sessKey = null;
-            await performLogin();
-            return res.status(503).json({ 
-                error: "Session expired. Please try again.",
-                retry: true 
-            });
+        // Check if session expired
+        if (typeof response.data === 'string') {
+            if (response.data.includes('login') || response.data.includes('Sign In')) {
+                console.log("🔄 Session expired, re-logging...");
+                STATE.sessKey = null;
+                await performLogin(true);
+                return res.redirect(req.originalUrl);
+            }
         }
 
-        // Apply transformations based on type
-        let resultData = response.data;
+        // Parse JSON and apply transformations
+        let jsonData;
+        try {
+            jsonData = typeof response.data === 'string' ? 
+                JSON.parse(response.data) : response.data;
+        } catch (e) {
+            return res.json(response.data);
+        }
+
+        // Apply fixes
         if (type === 'numbers') {
-            const parsed = typeof resultData === 'string' ? JSON.parse(resultData) : resultData;
-            resultData = fixNumbers(parsed);
+            jsonData = fixNumbers(jsonData);
         } else if (type === 'sms') {
-            const parsed = typeof resultData === 'string' ? JSON.parse(resultData) : resultData;
-            resultData = fixSMS(parsed);
+            jsonData = fixSMS(jsonData);
         }
 
-        res.set('Content-Type', 'application/json');
-        res.json(resultData);
+        res.json(jsonData);
 
-    } catch (e) {
-        console.error("API Error:", e.message);
+    } catch (error) {
+        console.error("API Error:", error.message);
         
-        // Handle 403 Forbidden (session expired)
-        if (e.response && e.response.status === 403) {
-            STATE.cookie = null;
+        if (error.response?.status === 403) {
             STATE.sessKey = null;
-            await performLogin();
-            return res.status(503).json({ 
-                error: "Session expired. Please try again.",
-                retry: true 
-            });
+            await performLogin(true);
+            return res.redirect(req.originalUrl);
         }
         
-        res.status(500).json({ error: e.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// --- SESSION STATUS ENDPOINT ---
-router.get('/status', (req, res) => {
+// --- FAST STATUS CHECK ---
+router.get('/status', async (req, res) => {
     res.json({
-        loggedIn: !!(STATE.cookie && STATE.sessKey),
-        hasCookie: !!STATE.cookie,
-        hasSessKey: !!STATE.sessKey,
+        loggedIn: !!STATE.sessKey,
         sessKey: STATE.sessKey || null,
-        lastLogin: global.lastLoginTime ? new Date(global.lastLoginTime).toISOString() : null
+        lastLogin: STATE.lastLogin ? new Date(STATE.lastLogin).toISOString() : null,
+        cookieCount: (await cookieJar.getCookies(BASE_URL)).length
     });
 });
 
-// --- FORCE RE-LOGIN ENDPOINT ---
+// --- FAST RE-LOGIN ---
 router.post('/relogin', async (req, res) => {
-    try {
-        await performLogin();
-        res.json({ success: true, message: "Re-login successful" });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    const success = await performLogin(true);
+    res.json({ 
+        success, 
+        message: success ? "Login successful" : "Login failed",
+        sessKey: STATE.sessKey 
+    });
 });
 
-// --- EXPORT ROUTER ---
-module.exports = router;
+// --- INITIAL LOGIN (FAST) ---
+(async () => {
+    console.log("🚀 Starting initial login...");
+    await performLogin();
+})();
 
-// --- INITIAL LOGIN ---
-performLogin();
+module.exports = router;
