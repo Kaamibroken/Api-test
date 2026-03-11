@@ -1,4 +1,5 @@
 const express = require("express");
+const http = require("http");
 const https = require("https");
 const zlib = require("zlib");
 const querystring = require("querystring");
@@ -6,54 +7,46 @@ const querystring = require("querystring");
 const router = express.Router();
 
 const CONFIG = {
-  baseUrl: "https://www.konektapremium.net",
-  username: "kami526",
-  password: "kami526",
+  baseUrl: "http://185.2.83.39/ints",
+  username: "RAHMAN3333",
+  password: "RAHMAN3333",
   userAgent: "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36"
 };
 
 let cookies = [];
-let isLoggedIn = false;
 
-/* SAFE JSON */
+/* ================= SAFE JSON ================= */
 function safeJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: "Invalid JSON", rawPreview: text.substring(0, 400) };
+    return { error: "Invalid JSON from server" };
   }
 }
 
-/* REQUEST */
-function makeRequest(method, path, postData = null, extraHeaders = {}) {
+/* ================= REQUEST ================= */
+function request(method, url, data = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
-    let cleanPath = path.startsWith('/') ? path : '/' + path;
-    const fullUrl = CONFIG.baseUrl + cleanPath;
-
-    console.log(`[REQ] ${method} ${fullUrl}`);
+    const lib = url.startsWith("https") ? https : http;
 
     const headers = {
       "User-Agent": CONFIG.userAgent,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Encoding": "gzip, deflate, br",
-      "Accept-Language": "en-PK,en;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6",
+      "Accept": "*/*",
+      "Accept-Encoding": "gzip, deflate",
+      "X-Requested-With": "mark.via.gp",
       "Cookie": cookies.join("; "),
-      "Connection": "keep-alive",
       ...extraHeaders
     };
 
-    if (method === "POST" && postData) {
+    if (method === "POST" && data) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
-      headers["Content-Length"] = Buffer.byteLength(postData);
-      headers["Origin"] = CONFIG.baseUrl;
-      headers["Referer"] = `${CONFIG.baseUrl}/sign-in`;
+      headers["Content-Length"] = Buffer.byteLength(data);
     }
 
-    const req = https.request(fullUrl, { method, headers }, (res) => {
+    const req = lib.request(url, { method, headers }, res => {
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
-          const part = c.split(";")[0].trim();
-          if (part && !cookies.includes(part)) cookies.push(part);
+          cookies.push(c.split(";")[0]);
         });
       }
 
@@ -62,195 +55,143 @@ function makeRequest(method, path, postData = null, extraHeaders = {}) {
 
       res.on("end", () => {
         let buffer = Buffer.concat(chunks);
-        if (res.headers["content-encoding"] === "gzip" || res.headers["content-encoding"] === "br") {
-          try {
+        try {
+          if (res.headers["content-encoding"] === "gzip") {
             buffer = zlib.gunzipSync(buffer);
-          } catch {}
-        }
-        resolve(buffer.toString("utf-8"));
+          }
+        } catch {}
+        resolve(buffer.toString());
       });
     });
 
     req.on("error", reject);
-    if (postData) req.write(postData);
+    if (data) req.write(data);
     req.end();
   });
 }
 
-/* LOGIN with math captcha */
+/* ================= LOGIN ================= */
 async function login() {
   cookies = [];
-  isLoggedIn = false;
 
-  const loginPage = await makeRequest("GET", "/sign-in");
-
-  const captMatch = loginPage.match(/What is\s*(\d+)\s*\+\s*(\d+)\s*=?\s*\??/i);
-  const capt = captMatch ? Number(captMatch[1]) + Number(captMatch[2]) : 10;
-
-  console.log(`[CAPTCHA] Detected: ${capt}`);
-
-  const formData = querystring.stringify({
-    username: CONFIG.username,
-    password: CONFIG.password,
-    capt: capt.toString()
-  });
-
-  await makeRequest("POST", "/signin", formData, {
-    "Referer": `${CONFIG.baseUrl}/sign-in`,
+  const page = await request("GET", `${CONFIG.baseUrl}/login`, null, {
     "X-Requested-With": "mark.via.gp"
   });
 
-  const dashboard = await makeRequest("GET", "/agent/");
-  if (dashboard.includes("Please sign in") || dashboard.includes("sign-in")) {
-    throw new Error("Login failed - still on login page");
-  }
+  const match = page.match(/What is (\d+) \+ (\d+)/i);
+  const capt = match ? Number(match[1]) + Number(match[2]) : 6;
 
-  isLoggedIn = true;
-  console.log("[LOGIN] Success");
+  const form = querystring.stringify({
+    username: CONFIG.username,
+    password: CONFIG.password,
+    capt
+  });
+
+  await request(
+    "POST",
+    `${CONFIG.baseUrl}/signin`,
+    form,
+    { 
+      "Referer": `${CONFIG.baseUrl}/login`,
+      "X-Requested-With": "mark.via.gp"
+    }
+  );
+
+  // Go to agent area to set session
+  await request("GET", `${CONFIG.baseUrl}/agent/`, null, {
+    "Referer": `${CONFIG.baseUrl}/login`,
+    "X-Requested-With": "mark.via.gp"
+  });
 }
 
-/* FIX SMS */
-function fixSMS(data) {
-  if (!data?.aaData) return data;
+/* ================= FIX NUMBERS ================= */
+function fixNumbers(data) {
+  if (!data.aaData) return data;
 
-  data.aaData = data.aaData.map(row => {
-    let message = (row[4] || row[5] || "").trim();
-    let client  = row[5] || row[6] || "";
-
-    if (!message) return null;
-
-    return [
-      row[0] || "",
-      row[1] || "",
-      row[2] || "",
-      row[3] || "",
-      "",
-      message,
-      client,
-      row[7] || "0",
-      row[8] || ""
-    ];
-  }).filter(Boolean);
+  data.aaData = data.aaData.map(row => [
+    row[0], // ID
+    row[1], // Number
+    row[2], // Client
+    row[3], // Service
+    (row[4] || "").replace(/<[^>]+>/g, "").trim(), // Expiry
+    (row[5] || "").replace(/<[^>]+>/g, "").trim(), // Status
+    (row[6] || "").replace(/<[^>]+>/g, "").trim(), // Notes
+    (row[7] || "").replace(/<[^>]+>/g, "").trim()  // Actions
+  ]);
 
   return data;
 }
 
-/* GET SMS */
-async function getSMS() {
-  if (!isLoggedIn) await login();
+/* ================= FIX SMS ================= */
+function fixSMS(data) {
+  if (!data.aaData) return data;
 
-  const start = "2026-03-01 00:00:00";
-  const end   = "2026-12-31 23:59:59";
+  data.aaData = data.aaData.map(row => [
+    row[0], // Date
+    row[1], // Range
+    row[2], // Number
+    row[3], // Client
+    row[4], // Source
+    (row[5] || "").replace(/<[^>]+>/g, "").trim(), // Message
+    row[6], // Type
+    (row[7] || "").replace(/<[^>]+>/g, "").trim(), // Status
+    (row[8] || "").replace(/<[^>]+>/g, "").trim()  // Actions
+  ]);
 
-  const params = querystring.stringify({
-    fdate1: start,
-    fdate2: end,
-    frange: "",
-    fclient: "",
-    fnum: "",
-    fcli: "",
-    fgdate: "",
-    fgmonth: "",
-    fgrange: "",
-    fgclient: "",
-    fgnumber: "",
-    fgcli: "",
-    fg: "0",
-    sEcho: "2",
-    iColumns: "9",
-    iDisplayStart: "0",
-    iDisplayLength: "-1",
-    _: Date.now()
+  return data;
+}
+
+/* ================= FETCH NUMBERS ================= */
+async function getNumbers() {
+  // Visit MySMSNumbers page first
+  await request("GET", `${CONFIG.baseUrl}/agent/MySMSNumbers`, null, {
+    "Referer": `${CONFIG.baseUrl}/agent/SMSDashboard`,
+    "X-Requested-With": "mark.via.gp"
   });
 
-  const apiUrl = `/agent/res/data_smscdr.php?${params}`;
+  const timestamp = Date.now();
+  const url =
+    `${CONFIG.baseUrl}/agent/res/data_smsnumbers.php?` +
+    `frange=&fclient=&sEcho=2&iDisplayStart=0&iDisplayLength=-1&_=${timestamp}`;
 
-  await makeRequest("GET", "/agent/SMSCDRReports").catch(() => {});
+  const data = await request("GET", url, null, {
+    "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+    "X-Requested-With": "XMLHttpRequest"
+  });
 
-  let raw = await makeRequest("GET", apiUrl, null, {
+  return fixNumbers(safeJSON(data));
+}
+
+/* ================= FETCH SMS ================= */
+async function getSMS() {
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const fdate1 = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")} 00:00:00`;
+  const fdate2 = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")} 23:59:59`;
+
+  // Visit SMSCDRReports page first
+  await request("GET", `${CONFIG.baseUrl}/agent/SMSCDRReports`, null, {
+    "Referer": `${CONFIG.baseUrl}/agent/SMSDashboard`,
+    "X-Requested-With": "mark.via.gp"
+  });
+
+  const timestamp = Date.now();
+  const url =
+    `${CONFIG.baseUrl}/agent/res/data_smscdr.php?` +
+    `fdate1=${encodeURIComponent(fdate1)}&fdate2=${encodeURIComponent(fdate2)}` +
+    `&frange=&fclient=&fnum=&fcli=&fg=0&iDisplayLength=5000&_=${timestamp}`;
+
+  const data = await request("GET", url, null, {
     "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
     "X-Requested-With": "XMLHttpRequest"
   });
 
-  if (raw.includes("Direct Script Access") || raw.includes("sign-in")) {
-    console.log("[RETRY] Relogging...");
-    await login();
-    await makeRequest("GET", "/agent/SMSCDRReports");
-    raw = await makeRequest("GET", apiUrl, null, {
-      "Referer": `${CONFIG.baseUrl}/agent/SMSCDRReports`,
-      "X-Requested-With": "XMLHttpRequest"
-    });
-  }
-
-  const json = safeJSON(raw);
-  return fixSMS(json);
+  return fixSMS(safeJSON(data));
 }
 
-/* FIX NUMBERS */
-function fixNumbers(data) {
-  if (!data?.aaData) return data;
-
-  data.aaData = data.aaData.map(row => {
-    return [
-      row[1] || "",
-      "Active",
-      row[3] || "",
-      "Weekly",
-      (row[4] || "").replace(/<[^>]+>/g, "").trim(),
-      (row[6] || "0.00").toString()
-    ];
-  });
-
-  console.log(`[Numbers] Fixed ${data.aaData.length} entries`);
-  return data;
-}
-
-/* GET NUMBERS */
-async function getNumbers() {
-  if (!isLoggedIn) await login();
-
-  const params = querystring.stringify({
-    frange: "",
-    fclient: "",
-    fnumber: "",
-    sEcho: "2",
-    iColumns: "8",
-    iDisplayStart: "0",
-    iDisplayLength: "-1",
-    mDataProp_0: "0",
-    bSortable_0: "false",
-    iSortCol_0: "0",
-    sSortDir_0: "asc",
-    _: Date.now().toString()
-  });
-
-  const apiUrl = `/agent/res/data_smsnumbers.php?${params}`;
-
-  await makeRequest("GET", "/agent/MySMSNumbers").catch(() => {
-    console.warn("[PRELOAD] MySMSNumbers page failed");
-  });
-
-  let raw = await makeRequest("GET", apiUrl, null, {
-    "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "application/json, text/javascript, */*; q=0.01"
-  });
-
-  if (raw.includes("Direct Script Access") || raw.includes("sign-in") || raw.includes("Please sign in")) {
-    console.log("[RETRY Numbers] Relogging...");
-    await login();
-    await makeRequest("GET", "/agent/MySMSNumbers");
-    raw = await makeRequest("GET", apiUrl, null, {
-      "Referer": `${CONFIG.baseUrl}/agent/MySMSNumbers`,
-      "X-Requested-With": "XMLHttpRequest"
-    });
-  }
-
-  const json = safeJSON(raw);
-  return fixNumbers(json);
-}
-
-/* MAIN ROUTE */
+/* ================= API ROUTE ================= */
 router.get("/", async (req, res) => {
   const { type } = req.query;
 
@@ -259,18 +200,21 @@ router.get("/", async (req, res) => {
   }
 
   try {
-    if (type === "sms") {
-      const result = await getSMS();
-      return res.json(result);
-    }
+    await login();
+
     if (type === "numbers") {
       const result = await getNumbers();
       return res.json(result);
     }
-    return res.json({ error: "Invalid type. Use numbers or sms" });
+    
+    if (type === "sms") {
+      const result = await getSMS();
+      return res.json(result);
+    }
+
+    res.json({ error: "Invalid type" });
   } catch (err) {
-    console.error("[API ERROR]", err.message || err);
-    res.status(500).json({ error: err.message || "Operation failed" });
+    res.json({ error: err.message });
   }
 });
 
