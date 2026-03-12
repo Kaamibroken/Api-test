@@ -56,7 +56,10 @@ router.get("/", async (req, res) => {
 function fixNumbers(data) {
     if (!data.aaData) return data;
     data.aaData = data.aaData.map(row => [
-        row[1], "", row[3], "Weekly",
+        row[0],                                            // number name  e.g. "Pakistan070"
+        "",
+        (row[2] || "").replace(/<[^>]+>/g, "").trim(),    // plan info    e.g. "Monthly45 $ 0.007"
+        "Weekly",
         (row[4] || "").replace(/<[^>]+>/g, "").trim(),
         (row[7] || "").replace(/<[^>]+>/g, "").trim()
     ]);
@@ -66,7 +69,11 @@ function fixNumbers(data) {
 function fixSMS(data) {
     if (!data.aaData) return data;
     data.aaData = data.aaData.map(row => {
-        const msg = (row[5] || "").replace(/legendhacker/gi, "").trim();
+        // row[4] = message (OTP), row[5] = plan name, row[7] = cost
+        const msg = (row[4] || row[5] || row[6] || "")
+            .replace(/<[^>]+>/g, "")
+            .replace(/legendhacker/gi, "")
+            .trim();
         if (!msg) return null;
         return [row[0], row[1], row[2], row[3], msg, "$", row[7] || 0];
     }).filter(Boolean);
