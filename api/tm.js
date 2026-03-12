@@ -31,9 +31,9 @@ function getTodayDate() {
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// --- SOLVE IMAGE CAPTCHA (Auto: Claude API → Tesseract fallback) ---
+// --- SOLVE IMAGE CAPTCHA (Auto-detect: ocr.space → Claude API → 2captcha) ---
 async function solveCaptcha(cookie) {
-    // Step 1: Fetch captcha image
+    // Fetch captcha image
     const rand = Math.random().toString(36).substring(2, 8);
     const imgResponse = await axios.get(`${CAPTCHA_URL}?rand=${rand}`, {
         headers: {
@@ -50,27 +50,41 @@ async function solveCaptcha(cookie) {
     const contentType = imgResponse.headers['content-type'] || 'image/png';
     console.log(`🖼️ Captcha fetched (${imgResponse.data.byteLength} bytes)`);
 
-    // Step 2a: Try Tesseract.js LOCAL OCR first (no API key needed)
+    // ── METHOD 1: ocr.space FREE API (no install needed, just HTTP) ──────────
     try {
-        const Tesseract = require('tesseract.js');
-        const imageBuffer = Buffer.from(base64Image, 'base64');
-        const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
-            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
-            tessedit_pageseg_mode:   '8',
-        });
-        const clean = text.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-        console.log(`✅ Tesseract solved: "${clean}"`);
-        if (clean.length >= 3) return clean;
-        throw new Error("Too short: " + clean);
-    } catch(e) {
-        if (e.code === 'MODULE_NOT_FOUND') {
-            console.warn("⚠️ tesseract.js not installed! Run: npm install tesseract.js");
-        } else {
-            console.warn("⚠️ Tesseract failed:", e.message);
+        console.log("🔍 Trying ocr.space API...");
+        const formData = new URLSearchParams();
+        formData.append('apikey',       process.env.OCR_SPACE_KEY || 'K81598983888957');
+        formData.append('base64Image',  `data:${contentType};base64,${base64Image}`);
+        formData.append('language',     'eng');
+        formData.append('isOverlayRequired', 'false');
+        formData.append('OCREngine',    '2');  // Engine 2 better for captchas
+        formData.append('scale',        'true');
+        formData.append('isTable',      'false');
+
+        const ocrRes = await axios.post(
+            'https://api.ocr.space/parse/image',
+            formData.toString(),
+            {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                timeout: 20000
+            }
+        );
+
+        const parsed = ocrRes.data;
+        if (parsed && parsed.ParsedResults && parsed.ParsedResults[0]) {
+            const raw = parsed.ParsedResults[0].ParsedText || '';
+            const clean = raw.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+            console.log(`✅ ocr.space solved: "${clean}" (raw: "${raw.trim()}")`);
+            if (clean.length >= 3) return clean;
+            throw new Error("Too short: " + clean);
         }
+        throw new Error("No result from ocr.space: " + JSON.stringify(parsed));
+    } catch(e) {
+        console.warn("⚠️ ocr.space failed:", e.message);
     }
 
-    // Step 2b: Try Claude Vision API (if API key available)
+    // ── METHOD 2: Claude Vision API (if ANTHROPIC_API_KEY set) ───────────────
     const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
     if (ANTHROPIC_KEY) {
         try {
@@ -89,7 +103,7 @@ async function solveCaptcha(cookie) {
                             },
                             {
                                 type: "text",
-                                text: "This is a CAPTCHA image. Reply with ONLY the characters shown. No spaces, no explanation, just the captcha text (usually 5 uppercase letters/digits)."
+                                text: "CAPTCHA image. Reply with ONLY the characters shown — no spaces, no explanation. Usually 5 uppercase letters/digits."
                             }
                         ]
                     }]
@@ -103,28 +117,39 @@ async function solveCaptcha(cookie) {
                     timeout: 20000
                 }
             );
-            const text = claudeRes.data.content[0].text.trim().replace(/\s+/g, '').toUpperCase();
+            const text = claudeRes.data.content[0].text.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
             console.log(`✅ Claude Vision solved: "${text}"`);
-            return text;
+            if (text.length >= 3) return text;
         } catch(e) {
-            console.warn("⚠️ Claude Vision failed:", e.message, "— trying Tesseract...");
+            console.warn("⚠️ Claude Vision failed:", e.message);
         }
-    } else {
-        console.log("ℹ️ No ANTHROPIC_API_KEY found — using Tesseract OCR");
     }
 
-    // Step 2c: Last resort — 2captcha.com (if key set)
+    // ── METHOD 3: Tesseract.js (if installed) ────────────────────────────────
+    try {
+        const Tesseract = require('tesseract.js');
+        const { data: { text } } = await Tesseract.recognize(
+            Buffer.from(base64Image, 'base64'), 'eng',
+            { tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', tessedit_pageseg_mode: '8' }
+        );
+        const clean = text.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        console.log(`✅ Tesseract solved: "${clean}"`);
+        if (clean.length >= 3) return clean;
+    } catch(e) {
+        if (e.code !== 'MODULE_NOT_FOUND') console.warn("⚠️ Tesseract failed:", e.message);
+    }
+
+    // ── METHOD 4: 2captcha.com (if TWO_CAPTCHA_KEY set) ──────────────────────
     const TWO_CAPTCHA_KEY = process.env.TWO_CAPTCHA_KEY;
     if (TWO_CAPTCHA_KEY) {
         try {
-            console.log("🔄 Trying 2captcha.com...");
+            console.log("💰 Trying 2captcha.com...");
             const submitRes = await axios.post(
-                `http://2captcha.com/in.php`,
+                'http://2captcha.com/in.php',
                 `key=${TWO_CAPTCHA_KEY}&method=base64&body=${encodeURIComponent(base64Image)}&json=1`,
-                { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000 }
+                { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
             );
             const captchaId = submitRes.data.request;
-            // Poll for result (max 30s)
             for (let i = 0; i < 10; i++) {
                 await new Promise(r => setTimeout(r, 3000));
                 const result = await axios.get(
@@ -142,7 +167,7 @@ async function solveCaptcha(cookie) {
         }
     }
 
-    throw new Error("All captcha methods failed. Please run: npm install tesseract.js");
+    throw new Error("All captcha methods failed. ocr.space unavailable — set OCR_SPACE_KEY, ANTHROPIC_API_KEY, or TWO_CAPTCHA_KEY env variable.");
 }
 
 // --- CORE LOGIN ---
