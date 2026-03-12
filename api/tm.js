@@ -1,359 +1,242 @@
-const express = require('express');
-const axios = require('axios');
+const express = require("express");
+const http = require("http");
+const zlib = require("zlib");
+const querystring = require("querystring");
+
 const router = express.Router();
 
-// --- CONFIGURATION ---
-const CREDENTIALS = {
-    username: "Kami526",
-    password: "Kami526"
+const CONFIG = {
+  baseUrl: "http://www.timesms.net",
+  username: "Kami526",
+  password: "Kami526",
+  userAgent: "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36"
 };
 
-const BASE_URL = "http://185.2.83.39/ints";
-const STATS_PAGE_URL = `${BASE_URL}/agent/SMSCDRReports`;
+let cookies = [];
+let isLoggedIn = false;
 
-const COMMON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
-    "X-Requested-With": "XMLHttpRequest",
-    "Origin": BASE_URL,
-    "Accept-Language": "en-US,en;q=0.9,ur-PK;q=0.8,ur;q=0.7"
-};
-
-// --- GLOBAL STATE ---
-let STATE = {
-    cookie: null,
-    sessKey: null,
-    loginPromise: null  // ✅ FIX: Promise store karo taake sab await kar sakein
-};
-
-// --- HELPERS ---
-function getTodayDate() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+/* SAFE JSON */
+function safeJSON(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: "Invalid JSON from server", rawPreview: text.substring(0, 300) };
+  }
 }
 
-function extractKey(html) {
-    // Multiple patterns try karo
-    const patterns = [
-        /sesskey=([A-Za-z0-9+/=]+)/,
-        /sesskey\s*[:=]\s*["']([^"']+)["']/,
-        /[?&]sesskey=([^&"'\s]+)/,
-        /sesskey","([^"]+)"/,
-    ];
-    for (const p of patterns) {
-        const m = html.match(p);
-        if (m && m[1]) {
-            console.log(`✅ sessKey found: ${m[1].substring(0,20)}...`);
-            return m[1];
+/* REQUEST */
+function makeRequest(method, path, data = null, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    let cleanPath = path.startsWith('/') ? path : '/' + path;
+    const fullUrl = CONFIG.baseUrl + cleanPath;
+
+    if (fullUrl.includes('http:') && fullUrl.indexOf('http:') !== fullUrl.lastIndexOf('http:')) {
+      return reject(new Error("Invalid URL - double domain"));
+    }
+
+    console.log(`[REQ] ${method} ${fullUrl}`);
+
+    const headers = {
+      "User-Agent": CONFIG.userAgent,
+      "Accept": "application/json, text/javascript, */*; q=0.01",
+      "Accept-Encoding": "gzip, deflate",
+      "Accept-Language": "en-PK,en;q=0.9",
+      "Cookie": cookies.join("; "),
+      ...extraHeaders
+    };
+
+    if (method === "POST" && data) {
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
+      headers["Content-Length"] = Buffer.byteLength(data);
+      headers["Origin"] = CONFIG.baseUrl;
+    }
+
+    const req = http.request(fullUrl, { method, headers }, res => {
+      if (res.headers["set-cookie"]) {
+        res.headers["set-cookie"].forEach(c => {
+          const part = c.split(";")[0];
+          if (!cookies.includes(part)) cookies.push(part);
+        });
+      }
+
+      let chunks = [];
+      res.on("data", d => chunks.push(d));
+
+      res.on("end", () => {
+        let buffer = Buffer.concat(chunks);
+        if (res.headers["content-encoding"] === "gzip") {
+          try { buffer = zlib.gunzipSync(buffer); } catch {}
         }
-    }
-    // Debug: pehle 2000 chars print karo
-    console.error("❌ sessKey not found in HTML. Sample:", html.substring(0, 2000));
-    return null;
-}
-
-// --- CORE LOGIN FUNCTION ---
-function performLogin() {
-    // ✅ FIX: Agar already login ho raha hai toh wahi promise return karo
-    if (STATE.loginPromise) {
-        console.log("⏳ Login already in progress, waiting...");
-        return STATE.loginPromise;
-    }
-
-    STATE.loginPromise = _doLogin().finally(() => {
-        STATE.loginPromise = null; // Done hone ke baad clear karo
+        resolve(buffer.toString());
+      });
     });
 
-    return STATE.loginPromise;
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
 }
 
-async function _doLogin() {
-    console.log("🔐 Starting login...");
+/* LOGIN */
+async function login() {
+  cookies = [];
+  isLoggedIn = false;
 
-    const instance = axios.create({
-        headers: COMMON_HEADERS,
-        timeout: 20000,
-        withCredentials: true
-    });
+  const page = await makeRequest("GET", "/login");
 
-    // Step 1: GET login page (session cookie + captcha)
-    let tempCookie = "";
-    try {
-        const r1 = await instance.get(`${BASE_URL}/login`);
-        console.log("📄 Login page fetched. Status:", r1.status);
+  const match = page.match(/What is (\d+)\s*\+\s*(\d+)\s*=?\s*\??/i);
+  const capt = match ? Number(match[1]) + Number(match[2]) : 10;
 
-        if (r1.headers['set-cookie']) {
-            const c = r1.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
-            if (c) {
-                tempCookie = c.split(';')[0];
-                console.log("🍪 Initial cookie:", tempCookie);
-            }
-        }
+  const form = querystring.stringify({
+    username: CONFIG.username,
+    password: CONFIG.password,
+    capt
+  });
 
-        // Captcha solve karo
-        const match = r1.data.match(/What is\s+(\d+)\s*\+\s*(\d+)/i);
-        const ans = match ? parseInt(match[1]) + parseInt(match[2]) : 4;
-        console.log("🔢 Captcha answer:", ans, match ? `(${match[1]}+${match[2]})` : "(fallback=4)");
+  await makeRequest("POST", "/signin", form, {
+    Referer: `${CONFIG.baseUrl}/login`
+  });
 
-        // Step 2: POST signin
-        const r2 = await instance.post(
-            `${BASE_URL}/signin`,
-            new URLSearchParams({
-                username: CREDENTIALS.username,
-                password: CREDENTIALS.password,
-                capt: String(ans)
-            }),
-            {
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Cookie": tempCookie,
-                    "Referer": `${BASE_URL}/login`
-                },
-                maxRedirects: 0,
-                validateStatus: () => true
-            }
-        );
+  const test = await makeRequest("GET", "/agent/");
+  if (test.includes("Please sign in") || test.includes("login")) {
+    throw new Error("Login failed");
+  }
 
-        console.log("📬 Signin response status:", r2.status);
-        console.log("📬 Signin headers:", JSON.stringify(r2.headers['set-cookie'] || []));
-
-        // Cookie update karo
-        if (r2.headers['set-cookie']) {
-            const newC = r2.headers['set-cookie'].find(x => x.includes('PHPSESSID'));
-            STATE.cookie = newC ? newC.split(';')[0] : tempCookie;
-        } else {
-            STATE.cookie = tempCookie;
-        }
-        console.log("🍪 Final cookie:", STATE.cookie);
-
-    } catch (e) {
-        console.error("❌ Login step 1/2 failed:", e.message);
-        throw e;
-    }
-
-    // Step 3: sessKey fetch karo
-    try {
-        const r3 = await axios.get(STATS_PAGE_URL, {
-            headers: {
-                ...COMMON_HEADERS,
-                "Cookie": STATE.cookie,
-                "Referer": `${BASE_URL}/agent/SMSDashboard`
-            },
-            timeout: 20000
-        });
-
-        console.log("📄 Stats page status:", r3.status);
-
-        // Agar redirect ya login page aa jaye
-        if (r3.data && (r3.data.includes('id="loginform"') || r3.data.includes('/ints/login'))) {
-            console.error("❌ Stats page returned login page — credentials/cookie wrong!");
-            STATE.cookie = null;
-            STATE.sessKey = null;
-            return;
-        }
-
-        const key = extractKey(r3.data);
-        if (key) {
-            STATE.sessKey = key;
-            console.log("✅ Login complete! sessKey stored.");
-        } else {
-            console.error("⚠️ Login may have succeeded but sessKey not found.");
-            // Fallback: CDR page try karo
-            await tryFetchSessKeyFromCDR();
-        }
-
-    } catch (e) {
-        console.error("❌ sessKey fetch failed:", e.message);
-        throw e;
-    }
+  isLoggedIn = true;
+  console.log("[LOGIN] Success");
 }
 
-// Fallback: CDR page se sessKey dhundhne ki koshish
-async function tryFetchSessKeyFromCDR() {
-    try {
-        const today = getTodayDate();
-        // Pehle CDR page fetch karo without sesskey
-        const r = await axios.get(`${BASE_URL}/agent/SMSCDRReports`, {
-            headers: { ...COMMON_HEADERS, "Cookie": STATE.cookie },
-            timeout: 15000
-        });
-        const key = extractKey(r.data);
-        if (key) {
-            STATE.sessKey = key;
-            console.log("✅ sessKey found via CDR page fallback.");
-        }
-    } catch(e) {
-        console.error("❌ CDR fallback failed:", e.message);
-    }
-}
-
-// --- AUTO REFRESH: har 90 seconds ---
-setInterval(() => {
-    console.log("🔄 Auto refresh login...");
-    performLogin().catch(e => console.error("Auto-refresh error:", e.message));
-}, 90000);
-
-// --- API ROUTE ---
-router.get('/', async (req, res) => {
-    const { type } = req.query;
-
-    // Agar session nahi hai toh login karo aur WAIT karo
-    if (!STATE.cookie || !STATE.sessKey) {
-        console.log("🔄 No session, performing login...");
-        try {
-            await performLogin();
-        } catch(e) {
-            return res.status(500).json({ error: "Login failed: " + e.message });
-        }
-
-        // Login ke baad bhi nahi mila?
-        if (!STATE.cookie || !STATE.sessKey) {
-            return res.status(503).json({
-                error: "Login failed — check credentials or server availability.",
-                debug: {
-                    cookie: STATE.cookie ? "present" : "missing",
-                    sessKey: STATE.sessKey ? "present" : "missing"
-                }
-            });
-        }
-    }
-
-    const ts = Date.now();
-    const today = getTodayDate();
-    let targetUrl = "", referer = "";
-
-    if (type === 'numbers') {
-        referer = `${BASE_URL}/agent/MySMSNumbers`;
-        targetUrl = `${BASE_URL}/agent/res/data_smsnumbers.php`
-            + `?frange=&fclient=`
-            + `&sEcho=2`
-            + `&iColumns=8`
-            + `&sColumns=%2C%2C%2C%2C%2C%2C%2C`
-            + `&iDisplayStart=0&iDisplayLength=-1`
-            + `&mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=false`
-            + `&mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true`
-            + `&mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true`
-            + `&mDataProp_3=3&sSearch_3=&bRegex_3=false&bSearchable_3=true&bSortable_3=true`
-            + `&mDataProp_4=4&sSearch_4=&bRegex_4=false&bSearchable_4=true&bSortable_4=true`
-            + `&mDataProp_5=5&sSearch_5=&bRegex_5=false&bSearchable_5=true&bSortable_5=true`
-            + `&mDataProp_6=6&sSearch_6=&bRegex_6=false&bSearchable_6=true&bSortable_6=true`
-            + `&mDataProp_7=7&sSearch_7=&bRegex_7=false&bSearchable_7=true&bSortable_7=false`
-            + `&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=asc&iSortingCols=1`
-            + `&_=${ts}`;
-
-    } else if (type === 'sms') {
-        referer = `${BASE_URL}/agent/SMSCDRReports`;
-        targetUrl = `${BASE_URL}/agent/res/data_smscdr.php`
-            + `?fdate1=${today}%2000:00:00&fdate2=2999-03-11%2023:59:59`
-            + `&frange=&fclient=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgclient=&fgnumber=&fgcli=&fg=0`
-            + `&sesskey=${STATE.sessKey}`
-            + `&sEcho=1`
-            + `&iColumns=9`
-            + `&sColumns=%2C%2C%2C%2C%2C%2C%2C%2C`
-            + `&iDisplayStart=0&iDisplayLength=5000`
-            + `&mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=true`
-            + `&mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true`
-            + `&mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true`
-            + `&mDataProp_3=3&sSearch_3=&bRegex_3=false&bSearchable_3=true&bSortable_3=true`
-            + `&mDataProp_4=4&sSearch_4=&bRegex_4=false&bSearchable_4=true&bSortable_4=true`
-            + `&mDataProp_5=5&sSearch_5=&bRegex_5=false&bSearchable_5=true&bSortable_5=true`
-            + `&mDataProp_6=6&sSearch_6=&bRegex_6=false&bSearchable_6=true&bSortable_6=true`
-            + `&mDataProp_7=7&sSearch_7=&bRegex_7=false&bSearchable_7=true&bSortable_7=true`
-            + `&mDataProp_8=8&sSearch_8=&bRegex_8=false&bSearchable_8=true&bSortable_8=false`
-            + `&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=desc&iSortingCols=1`
-            + `&_=${ts}`;
-    } else {
-        return res.status(400).json({ error: "Invalid type. Use ?type=numbers or ?type=sms" });
-    }
-
-    try {
-        console.log("📡 Fetching:", targetUrl.substring(0, 100));
-        const response = await axios.get(targetUrl, {
-            headers: {
-                ...COMMON_HEADERS,
-                "Cookie": STATE.cookie,
-                "Referer": referer
-            },
-            timeout: 20000
-        });
-
-        // Session expired check
-        if (typeof response.data === 'string' &&
-            (response.data.includes('<html') || response.data.toLowerCase().includes('login'))) {
-            console.warn("⚠️ Session expired, re-logging in...");
-            STATE.cookie = null;
-            STATE.sessKey = null;
-            try {
-                await performLogin();
-            } catch(e) {
-                return res.status(500).json({ error: "Re-login failed: " + e.message });
-            }
-            return res.status(503).json({ error: "Session was expired. Please retry request." });
-        }
-
-        let result = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-
-        if (type === 'numbers') result = fixNumbers(result);
-        if (type === 'sms')     result = fixSMS(result);
-
-        res.set('Content-Type', 'application/json');
-        res.json(result);
-
-    } catch (e) {
-        if (e.response?.status === 403) {
-            STATE.cookie = null;
-            STATE.sessKey = null;
-            performLogin().catch(() => {});
-            return res.status(403).json({ error: "403 Forbidden — session reset, retry in 5 seconds." });
-        }
-        console.error("❌ Fetch error:", e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// --- EXPORT ---
-module.exports = router;
-
-// --- INITIAL LOGIN (startup pe) ---
-performLogin().catch(e => console.error("Initial login error:", e.message));
-
-/* ================= FIX NUMBERS ================= */
+/* FIX NUMBERS & SMS */
 function fixNumbers(data) {
   if (!data.aaData) return data;
-
   data.aaData = data.aaData.map(row => [
-    row[1],
+    row[1] || "",
     "",
-    row[3],
+    row[3] || "",
     (row[4] || "").replace(/<[^>]+>/g, "").trim(),
-    (row[7] || "").replace(/<[^>]+>/g, "").trim()
+    (row[7] || "").replace(/<[^>]+>/g, "").trim(),
+   "Weekly"
   ]);
-
   return data;
 }
 
-/* ================= FIX SMS (FINAL CORRECT) ================= */
 function fixSMS(data) {
   if (!data.aaData) return data;
-
   data.aaData = data.aaData
     .map(row => {
-      let message = (row[5] || "")
-        .replace(/kamibroken/gi, "")
-        .trim();
-
+      let message = (row[5] || "").replace(/legendhacker/gi, "").trim();
       if (!message) return null;
-
       return [
-        row[0], // date
-        row[1], // range
-        row[2], // number
-        row[3], // service
-        message, // OTP MESSAGE
+        row[0] || "",
+        row[1] || "",
+        row[2] || "",
+        row[3] || "",
+        message,
         "$",
         row[7] || 0
       ];
     })
     .filter(Boolean);
-
   return data;
 }
+
+/* GET NUMBERS */
+async function getNumbers() {
+  if (!isLoggedIn) await login();
+
+  const params = querystring.stringify({
+    frange: "",
+    fclient: "",
+    sEcho: "2",
+    iDisplayStart: "0",
+    iDisplayLength: "-1"
+  });
+
+  let data = await makeRequest("GET", `/agent/res/data_smsnumbers.php?${params}`, null, {
+    Referer: `${CONFIG.baseUrl}/agent/MySMSNumbers`,
+    "X-Requested-With": "XMLHttpRequest"
+  });
+
+  return fixNumbers(safeJSON(data));
+}
+
+/* GET SMS - USING YOUR WIDE RANGE PATTERN */
+async function getSMS() {
+  await login();
+
+  // Wide date range (your pattern)
+  const startDate = "2026-03-15";
+  const endDate = "2099-12-31";
+
+  console.log("[SMS] Wide range:", startDate, "to", endDate);
+
+  const params = [
+    `fdate1=${encodeURIComponent(startDate + " 00:00:00")}`,
+    `fdate2=${encodeURIComponent(endDate + " 23:59:59")}`,
+    `frange=`,
+    `fclient=`,
+    `fnum=`,
+    `fcli=`,
+    `fg=0`,
+    `iDisplayLength=2000`  // your suggested value
+  ].join('&');
+
+  const urlPath = `/agent/res/data_smscdr.php?${params}`;
+
+  console.log("[SMS] Full URL:", CONFIG.baseUrl + urlPath);
+
+  // Load parent page first
+  try {
+    await makeRequest("GET", "/agent/SMSCDRReports", null, {
+      Referer: `${CONFIG.baseUrl}/agent/`
+    });
+    console.log("[SMS] Loaded SMSCDRReports");
+  } catch (err) {
+    console.warn("[SMS] SMSCDRReports load failed:", err.message);
+  }
+
+  let data = await makeRequest("GET", urlPath, null, {
+    Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/javascript, */*; q=0.01"
+  });
+
+  console.log("[SMS RAW PREVIEW]", data.substring(0, 1000));
+
+  // Retry if blocked
+  if (data.includes("Direct Script Access") || data.includes("Please sign in") || data.includes("login")) {
+    console.log("[SMS] Blocked - retrying...");
+    await login();
+    await makeRequest("GET", "/agent/SMSCDRReports");
+    data = await makeRequest("GET", urlPath, null, {
+      Referer: `${CONFIG.baseUrl}/agent/SMSCDRReports`,
+      "X-Requested-With": "XMLHttpRequest"
+    });
+    console.log("[SMS RETRY PREVIEW]", data.substring(0, 1000));
+  }
+
+  const json = safeJSON(data);
+  const result = fixSMS(json);
+
+  console.log("[SMS] Final messages count:", result.aaData?.length || 0);
+
+  return result;
+}
+
+/* ROUTE */
+router.get("/", async (req, res) => {
+  const { type } = req.query;
+
+  if (!type) return res.json({ error: "Use ?type=numbers or ?type=sms" });
+
+  try {
+    if (type === "numbers") return res.json(await getNumbers());
+    if (type === "sms") return res.json(await getSMS());
+    res.json({ error: "Invalid type" });
+  } catch (err) {
+    console.error("[ERROR]", err.message);
+    res.json({ error: err.message || "Failed" });
+  }
+});
+
+module.exports = router;
