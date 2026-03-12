@@ -50,7 +50,27 @@ async function solveCaptcha(cookie) {
     const contentType = imgResponse.headers['content-type'] || 'image/png';
     console.log(`🖼️ Captcha fetched (${imgResponse.data.byteLength} bytes)`);
 
-    // Step 2a: Try Claude Vision API (if API key available)
+    // Step 2a: Try Tesseract.js LOCAL OCR first (no API key needed)
+    try {
+        const Tesseract = require('tesseract.js');
+        const imageBuffer = Buffer.from(base64Image, 'base64');
+        const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
+            tessedit_pageseg_mode:   '8',
+        });
+        const clean = text.trim().replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        console.log(`✅ Tesseract solved: "${clean}"`);
+        if (clean.length >= 3) return clean;
+        throw new Error("Too short: " + clean);
+    } catch(e) {
+        if (e.code === 'MODULE_NOT_FOUND') {
+            console.warn("⚠️ tesseract.js not installed! Run: npm install tesseract.js");
+        } else {
+            console.warn("⚠️ Tesseract failed:", e.message);
+        }
+    }
+
+    // Step 2b: Try Claude Vision API (if API key available)
     const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
     if (ANTHROPIC_KEY) {
         try {
@@ -93,22 +113,6 @@ async function solveCaptcha(cookie) {
         console.log("ℹ️ No ANTHROPIC_API_KEY found — using Tesseract OCR");
     }
 
-    // Step 2b: Fallback — Tesseract.js local OCR
-    try {
-        const Tesseract = require('tesseract.js');
-        const imageBuffer = Buffer.from(base64Image, 'base64');
-        const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
-            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            tessedit_pageseg_mode: '8',  // single word
-        });
-        const clean = text.trim().replace(/\s+/g, '').toUpperCase();
-        console.log(`✅ Tesseract solved: "${clean}"`);
-        if (clean.length >= 3) return clean;
-        throw new Error("Tesseract result too short: " + clean);
-    } catch(e) {
-        console.warn("⚠️ Tesseract failed:", e.message);
-    }
-
     // Step 2c: Last resort — 2captcha.com (if key set)
     const TWO_CAPTCHA_KEY = process.env.TWO_CAPTCHA_KEY;
     if (TWO_CAPTCHA_KEY) {
@@ -138,7 +142,7 @@ async function solveCaptcha(cookie) {
         }
     }
 
-    throw new Error("All captcha methods failed. Set ANTHROPIC_API_KEY or TWO_CAPTCHA_KEY env variable.");
+    throw new Error("All captcha methods failed. Please run: npm install tesseract.js");
 }
 
 // --- CORE LOGIN ---
