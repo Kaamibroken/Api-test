@@ -2,157 +2,23 @@ const express = require("express");
 const axios   = require("axios");
 const router  = express.Router();
 
-const CREDENTIALS = { username: "Kami526", password: "Kami526" };
-const BASE_URL    = "http://51.89.7.175/sms";
+const BASE_URL = "http://51.89.7.175/sms";
+const COOKIE   = "PHPSESSID=br8hg6on2t8fn3e3lq0o1tn03h";
 
 const HEADERS = {
     "User-Agent":       "Mozilla/5.0 (Linux; Android 13; V2040 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.79 Mobile Safari/537.36",
     "Accept-Language":  "en-PK,en;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6",
-    "X-Requested-With": "mark.via.gp"
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept":           "application/json, text/javascript, */*; q=0.01"
 };
-
-let STATE = { cookie: null, loginPromise: null };
 
 function getToday() {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
 
-// --- IMAGE CAPTCHA SOLVER (ocr.space free) ---
-async function solveCaptcha(cookie) {
-    const rand = Math.random().toString(36).substring(2, 8);
-    const imgResp = await axios.get(`${BASE_URL}/captcha.php?rand=${rand}`, {
-        headers: { ...HEADERS, "Cookie": cookie, "Referer": `${BASE_URL}/SignIn`, "Accept": "image/*,*/*" },
-        responseType: "arraybuffer",
-        timeout: 15000
-    });
-
-    const base64 = Buffer.from(imgResp.data).toString("base64");
-    const mime   = imgResp.headers["content-type"] || "image/png";
-    console.log(`🖼️ [Kami] Captcha fetched (${imgResp.data.byteLength} bytes)`);
-
-    const form = new URLSearchParams();
-    form.append("apikey",           "helloworld");
-    form.append("base64Image",      `data:${mime};base64,${base64}`);
-    form.append("language",         "eng");
-    form.append("isOverlayRequired","false");
-    form.append("OCREngine",        "2");
-    form.append("scale",            "true");
-    form.append("isTable",          "false");
-
-    const ocrResp = await axios.post("https://api.ocr.space/parse/image", form.toString(), {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 25000
-    });
-
-    const parsed = ocrResp.data;
-    if (!parsed?.ParsedResults?.[0])
-        throw new Error("ocr.space no result: " + JSON.stringify(parsed));
-
-    const raw   = parsed.ParsedResults[0].ParsedText || "";
-    const clean = raw.trim().replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-    console.log(`🔑 [Kami] Captcha: "${clean}" (raw: "${raw.trim()}")`);
-
-    if (clean.length < 3) throw new Error("Captcha too short: " + clean);
-    return clean;
-}
-
-// --- LOGIN ---
-function performLogin() {
-    if (STATE.loginPromise) return STATE.loginPromise;
-    STATE.loginPromise = _doLogin().finally(() => { STATE.loginPromise = null; });
-    return STATE.loginPromise;
-}
-
-async function _doLogin() {
-    console.log("🔐 [Kami] Logging in...");
-
-    const r1 = await axios.get(`${BASE_URL}/SignIn`, {
-        headers: { ...HEADERS, "Accept": "text/html,*/*", "Cache-Control": "max-age=0" },
-        timeout: 15000
-    });
-
-    let cookie = "";
-    if (r1.headers["set-cookie"]) {
-        const c = r1.headers["set-cookie"].find(x => x.includes("PHPSESSID"));
-        if (c) cookie = c.split(";")[0];
-    }
-    console.log(`🍪 [Kami] Cookie: ${cookie}`);
-
-    // Retry up to 5 times with fresh captcha each time
-    for (let attempt = 1; attempt <= 5; attempt++) {
-        console.log(`🔄 [Kami] Attempt ${attempt}/5`);
-
-        let captchaText;
-        try {
-            captchaText = await solveCaptcha(cookie);
-        } catch(e) {
-            console.warn(`⚠️ [Kami] Captcha error: ${e.message}`);
-            if (attempt === 5) throw new Error("Captcha failed: " + e.message);
-            await new Promise(r => setTimeout(r, 1000));
-            continue;
-        }
-
-        const r2 = await axios.post(`${BASE_URL}/signmein`,
-            new URLSearchParams({ username: CREDENTIALS.username, password: CREDENTIALS.password, capt: captchaText }),
-            {
-                headers: {
-                    ...HEADERS,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Cookie":       cookie,
-                    "Referer":      `${BASE_URL}/SignIn`,
-                    "Origin":       "http://51.89.7.175",
-                    "Accept":       "text/html,*/*"
-                },
-                maxRedirects: 0, validateStatus: () => true, timeout: 15000
-            }
-        );
-
-        console.log(`📬 [Kami] Status: ${r2.status} | Location: ${r2.headers["location"] || "none"}`);
-
-        if (r2.headers["set-cookie"]) {
-            const c = r2.headers["set-cookie"].find(x => x.includes("PHPSESSID"));
-            if (c) cookie = c.split(";")[0];
-        }
-
-        const location = r2.headers["location"] || "";
-        const body     = typeof r2.data === "string" ? r2.data.toLowerCase() : "";
-
-        if ((r2.status === 302 || r2.status === 301) && location.includes("client")) {
-            STATE.cookie = cookie;
-            console.log("✅ [Kami] Login OK!");
-            return;
-        }
-
-        if (r2.status === 200 && !body.includes("invalid") && !body.includes("wrong") && !body.includes("signi")) {
-            STATE.cookie = cookie;
-            console.log("✅ [Kami] Login OK (200)!");
-            return;
-        }
-
-        if (r2.status === 302 || r2.status === 301) {
-            STATE.cookie = cookie;
-            console.log("✅ [Kami] Login redirect — OK.");
-            return;
-        }
-
-        console.warn(`⚠️ [Kami] Wrong captcha/creds, retrying...`);
-        await new Promise(r => setTimeout(r, 500));
-    }
-
-    throw new Error("Login failed after 5 attempts");
-}
-
-setInterval(() => performLogin().catch(e => console.error("[Kami] Refresh:", e.message)), 90000);
-
-// --- ROUTE ---
 router.get("/", async (req, res) => {
     const { type } = req.query;
-
-    if (!STATE.cookie) {
-        try { await performLogin(); } catch(e) { return res.status(500).json({ error: "Login failed: " + e.message }); }
-        if (!STATE.cookie) return res.status(503).json({ error: "Login failed after retries" });
-    }
 
     const ts = Date.now(), today = getToday();
     let url = "", referer = "";
@@ -169,14 +35,12 @@ router.get("/", async (req, res) => {
 
     try {
         const resp = await axios.get(url, {
-            headers: { ...HEADERS, "Cookie": STATE.cookie, "Referer": referer, "Accept": "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest" },
+            headers: { ...HEADERS, "Cookie": COOKIE, "Referer": referer },
             timeout: 20000
         });
 
-        if (typeof resp.data === "string" && (resp.data.includes("<html") || resp.data.toLowerCase().includes("signin"))) {
-            STATE.cookie = null;
-            await performLogin().catch(() => {});
-            return res.status(503).json({ error: "Session expire — retry karo." });
+        if (typeof resp.data === "string" && resp.data.includes("<html")) {
+            return res.status(401).json({ error: "Session expire ho gaya — PHPSESSID update karo." });
         }
 
         let result = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
@@ -185,7 +49,6 @@ router.get("/", async (req, res) => {
         res.json(result);
 
     } catch(e) {
-        if (e.response?.status === 403) { STATE.cookie = null; performLogin().catch(() => {}); }
         res.status(500).json({ error: e.message });
     }
 });
@@ -211,4 +74,3 @@ function fixSMS(data) {
 }
 
 module.exports = router;
-performLogin().catch(e => console.error("[Kami] Initial:", e.message));
