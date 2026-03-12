@@ -31,67 +31,114 @@ function getTodayDate() {
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// --- SOLVE IMAGE CAPTCHA via Claude Vision API ---
+// --- SOLVE IMAGE CAPTCHA (Auto: Claude API → Tesseract fallback) ---
 async function solveCaptcha(cookie) {
-    try {
-        // Step 1: Fetch captcha image as base64
-        const rand = Math.random().toString(36).substring(2, 8);
-        const imgResponse = await axios.get(`${CAPTCHA_URL}?rand=${rand}`, {
-            headers: {
-                ...COMMON_HEADERS,
-                "Cookie":  cookie,
-                "Referer": `${BASE_URL}/SignIn`,
-                "Accept":  "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-            },
-            responseType: "arraybuffer",
-            timeout: 15000
-        });
+    // Step 1: Fetch captcha image
+    const rand = Math.random().toString(36).substring(2, 8);
+    const imgResponse = await axios.get(`${CAPTCHA_URL}?rand=${rand}`, {
+        headers: {
+            ...COMMON_HEADERS,
+            "Cookie":  cookie,
+            "Referer": `${BASE_URL}/SignIn`,
+            "Accept":  "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        },
+        responseType: "arraybuffer",
+        timeout: 15000
+    });
 
-        const base64Image = Buffer.from(imgResponse.data).toString('base64');
-        const contentType = imgResponse.headers['content-type'] || 'image/png';
-        console.log(`🖼️ Captcha image fetched (${imgResponse.data.byteLength} bytes, ${contentType})`);
+    const base64Image = Buffer.from(imgResponse.data).toString('base64');
+    const contentType = imgResponse.headers['content-type'] || 'image/png';
+    console.log(`🖼️ Captcha fetched (${imgResponse.data.byteLength} bytes)`);
 
-        // Step 2: Send to Claude Vision API for OCR
-        const claudeRes = await axios.post(
-            "https://api.anthropic.com/v1/messages",
-            {
-                model: "claude-sonnet-4-20250514",
-                max_tokens: 50,
-                messages: [{
-                    role: "user",
-                    content: [
-                        {
-                            type: "image",
-                            source: {
-                                type:       "base64",
-                                media_type: contentType,
-                                data:       base64Image
+    // Step 2a: Try Claude Vision API (if API key available)
+    const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+    if (ANTHROPIC_KEY) {
+        try {
+            console.log("🤖 Trying Claude Vision API...");
+            const claudeRes = await axios.post(
+                "https://api.anthropic.com/v1/messages",
+                {
+                    model: "claude-sonnet-4-20250514",
+                    max_tokens: 50,
+                    messages: [{
+                        role: "user",
+                        content: [
+                            {
+                                type: "image",
+                                source: { type: "base64", media_type: contentType, data: base64Image }
+                            },
+                            {
+                                type: "text",
+                                text: "This is a CAPTCHA image. Reply with ONLY the characters shown. No spaces, no explanation, just the captcha text (usually 5 uppercase letters/digits)."
                             }
-                        },
-                        {
-                            type: "text",
-                            text: "This is a CAPTCHA image. Reply with ONLY the exact text/characters shown in the image. No spaces, no explanation, just the captcha text."
-                        }
-                    ]
-                }]
-            },
-            {
-                headers: {
-                    "Content-Type":      "application/json",
-                    "anthropic-version": "2023-06-01"
+                        ]
+                    }]
                 },
-                timeout: 20000
-            }
-        );
-
-        const captchaText = claudeRes.data.content[0].text.trim().replace(/\s+/g, '');
-        console.log(`🔑 Captcha solved: "${captchaText}"`);
-        return captchaText;
-
-    } catch (e) {
-        console.error("❌ Captcha solve failed:", e.message);
-        throw new Error("Captcha solve failed: " + e.message);
+                {
+                    headers: {
+                        "Content-Type":      "application/json",
+                        "x-api-key":         ANTHROPIC_KEY,
+                        "anthropic-version": "2023-06-01"
+                    },
+                    timeout: 20000
+                }
+            );
+            const text = claudeRes.data.content[0].text.trim().replace(/\s+/g, '').toUpperCase();
+            console.log(`✅ Claude Vision solved: "${text}"`);
+            return text;
+        } catch(e) {
+            console.warn("⚠️ Claude Vision failed:", e.message, "— trying Tesseract...");
+        }
+    } else {
+        console.log("ℹ️ No ANTHROPIC_API_KEY found — using Tesseract OCR");
     }
+
+    // Step 2b: Fallback — Tesseract.js local OCR
+    try {
+        const Tesseract = require('tesseract.js');
+        const imageBuffer = Buffer.from(base64Image, 'base64');
+        const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            tessedit_pageseg_mode: '8',  // single word
+        });
+        const clean = text.trim().replace(/\s+/g, '').toUpperCase();
+        console.log(`✅ Tesseract solved: "${clean}"`);
+        if (clean.length >= 3) return clean;
+        throw new Error("Tesseract result too short: " + clean);
+    } catch(e) {
+        console.warn("⚠️ Tesseract failed:", e.message);
+    }
+
+    // Step 2c: Last resort — 2captcha.com (if key set)
+    const TWO_CAPTCHA_KEY = process.env.TWO_CAPTCHA_KEY;
+    if (TWO_CAPTCHA_KEY) {
+        try {
+            console.log("🔄 Trying 2captcha.com...");
+            const submitRes = await axios.post(
+                `http://2captcha.com/in.php`,
+                `key=${TWO_CAPTCHA_KEY}&method=base64&body=${encodeURIComponent(base64Image)}&json=1`,
+                { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000 }
+            );
+            const captchaId = submitRes.data.request;
+            // Poll for result (max 30s)
+            for (let i = 0; i < 10; i++) {
+                await new Promise(r => setTimeout(r, 3000));
+                const result = await axios.get(
+                    `http://2captcha.com/res.php?key=${TWO_CAPTCHA_KEY}&action=get&id=${captchaId}&json=1`,
+                    { timeout: 10000 }
+                );
+                if (result.data.status === 1) {
+                    const solved = result.data.request.trim().toUpperCase();
+                    console.log(`✅ 2captcha solved: "${solved}"`);
+                    return solved;
+                }
+            }
+        } catch(e) {
+            console.warn("⚠️ 2captcha failed:", e.message);
+        }
+    }
+
+    throw new Error("All captcha methods failed. Set ANTHROPIC_API_KEY or TWO_CAPTCHA_KEY env variable.");
 }
 
 // --- CORE LOGIN ---
