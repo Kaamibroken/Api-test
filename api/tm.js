@@ -299,7 +299,9 @@ async function getSMS(token) {
       if (!r3) continue;
 
       // Parse OTP messages from HTML
+      console.log('[DEBUG r3]', JSON.stringify(r3.body.substring(0,500)));
       const msgs = parseSMSMessages(r3.body, range, number, today);
+      console.log('[DEBUG msgs]', JSON.stringify(msgs));
       allRows.push(...msgs);
     }
   }
