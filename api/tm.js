@@ -274,16 +274,20 @@ async function getSMS(token) {
 
   for (const range of ranges) {
     // Step 2: Get numbers per range
-    const b2 = new URLSearchParams({ _token: token, start: today, end: today, range }).toString();
-    const r2  = await makeRequest(
-      "POST", "/portal/sms/received/getsms/number", b2,
-      "application/x-www-form-urlencoded",
-      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
-    ).catch(() => null);
+    const b2 = `_token=${encodeURIComponent(token)}&start=${today}&end=${today}&range=${encodeURIComponent(range)}`;
+    let r2;
+    try {
+      r2 = await makeRequest(
+        "POST", "/portal/sms/received/getsms/number", b2,
+        "application/x-www-form-urlencoded",
+        { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+      );
+      console.log(`[IVAS r2] status=${r2.status} len=${r2.body.length} preview=${r2.body.substring(0,200)}`);
+    } catch(e) {
+      console.error(`[IVAS r2 FAIL] ${e.message}`);
+      continue;
+    }
 
-    if (!r2) continue;
-
-    // Extract numbers from HTML: toggleNum..('NUMBER','NUMBER_ID')
     const numbers = [...r2.body.matchAll(/toggleNum[^(]+\('(\d+)'/g)].map(m => m[1]);
     console.log(`[IVAS] ${range} → numbers: ${numbers.join(", ")}`);
 
