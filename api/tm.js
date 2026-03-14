@@ -12,6 +12,7 @@ const USER_AGENT     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 /* ================= COOKIES (Update when expired) ================= */
 // Jab expire ho: browser me login karo → DevTools → Network → koi bhi request
 // → Request Headers → Cookie se XSRF-TOKEN aur ivas_sms_session copy karo
+let TOKEN_CACHE = { value: null, time: 0 };
 let COOKIES = {
   "XSRF-TOKEN":       "eyJpdiI6Imszazf0VEZPd0RlVFVpTityeGlwWmc9PSIsInZhbHVlIjoiNUY1YldvbnNHa3dlSmRnT2t1TDNoMVArTjZqT2UwLzJZZFA3MnB3SHUwOUl2Q05pYjlEd3cydGJTOTJBb1hsL1QvL3lJT05GTXJqb3RadEhHQVh6UWc5azJ6bTdNS2N0NGtOQ3oyQXU3V1FvYTFHL2lPaS9FYnROQkhoV1ZRL0UiLCJtYWMiOiJmYTg0MjI1MjY4MGU4YmY1ZTdhMmUzODIwMGI1ZmM1NTYxMmMyMzE1ZWZmMjkxYTI2Yzc4YmJhZWVlZmRjNmE3IiwidGFnIjoiIn0%3D",
   "ivas_sms_session": "eyJpdiI6InBueWx0SE1BNXJEZjlRL3hja3p1cHc9PSIsInZhbHVlIjoiS1dQWHk2QWd0V1dTUm93Y2RLWE8rOTJML1kweUtmZENCdzRZOEhoQVNyOXhGSEFNWmlZUTZ1ZFlMMkwzWjZxdWg2K2xUZW13L3F5ZEVVSThaY0duQmlRUGtvcEZGNURJVDMyT3YxK05KY0NCQUZpNDh2ZUJIa3Iwa0xIZXdzSlciLCJtYWMiOiIyZTFkMjc1ZmE1ZmRkZjg3NzE0ZjcyYWMwMGJjNGMwOWYzZjBhNmM1ODA2OTljMDM3YjM5ZjQwZDI4ZWE1YjQ1IiwidGFnIjoiIn0%3D"
@@ -116,11 +117,19 @@ function makeRequest(method, path, body, contentType, extraHeaders = {}) {
 
 /* ================= FETCH _token FROM PORTAL ================= */
 async function fetchToken() {
+  // Cache token for 5 minutes
+  if (TOKEN_CACHE.value && (Date.now() - TOKEN_CACHE.time) < 5 * 60 * 1000) {
+    return TOKEN_CACHE.value;
+  }
   const resp = await makeRequest("GET", "/portal", null, null, {
     "Accept": "text/html,application/xhtml+xml,*/*"
   });
   const match = resp.body.match(/name="_token"\s+value="([^"]+)"/) ||
                 resp.body.match(/"csrf-token"\s+content="([^"]+)"/);
+  if (match) {
+    TOKEN_CACHE.value = match[1];
+    TOKEN_CACHE.time  = Date.now();
+  }
   return match ? match[1] : null;
 }
 
@@ -281,10 +290,8 @@ async function getSMS(token) {
 
   const ranges = [...r1.body.matchAll(/toggleRange\('([^']+)'/g)].map(m => m[1]);
 
-  const allRows = [];
-
-  for (const range of ranges) {
-    // Step 2: Get numbers per range
+  // Step 2+3: All ranges parallel
+  const rangeResults = await Promise.all(ranges.map(async range => {
     const b2 = `_token=${encodeURIComponent(token)}&start=${today}&end=${today}&range=${encodeURIComponent(range)}`;
     let r2;
     try {
@@ -293,28 +300,27 @@ async function getSMS(token) {
         "application/x-www-form-urlencoded",
         { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
       ), 10000, "r2");
-    } catch(e) {
-      r2 = { status: 0, body: "" };
-    }
+    } catch(e) { return []; }
 
     const numbers = [...r2.body.matchAll(/toggleNum[^(]+\('(\d+)'/g)].map(m => m[1]);
 
-    for (const number of numbers) {
+    // All numbers parallel
+    const numResults = await Promise.all(numbers.map(async number => {
       const b3 = `_token=${encodeURIComponent(token)}&start=${today}&end=${today}&Number=${number}&Range=${encodeURIComponent(range)}`;
-      let r3;
       try {
-        r3 = await withTimeout(makeRequest(
+        const r3 = await withTimeout(makeRequest(
           "POST", "/portal/sms/received/getsms/number/sms", b3,
           "application/x-www-form-urlencoded",
           { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
         ), 10000, "r3");
-      } catch(e) {
-        continue;
-      }
-      const msgs = parseSMSMessages(r3.body, range, number, today);
-      allRows.push(...msgs);
-    }
-  }
+        return parseSMSMessages(r3.body, range, number, today);
+      } catch(e) { return []; }
+    }));
+
+    return numResults.flat();
+  }));
+
+  const allRows = rangeResults.flat();
 
   return {
     sEcho:                1,
@@ -495,6 +501,7 @@ router.post("/update-session", express.json(), (req, res) => {
   }
   COOKIES["XSRF-TOKEN"]       = xsrf;
   COOKIES["ivas_sms_session"] = session;
+  TOKEN_CACHE.value = null; // reset token cache
   res.json({ success: true, message: "Cookies updated!" });
 });
 
