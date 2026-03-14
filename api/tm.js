@@ -307,6 +307,32 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Raw SMS HTML debug
+router.get("/raw-sms", async (req, res) => {
+  try {
+    const token = await fetchToken();
+    const today    = getToday();
+    const boundary = "----WebKitFormBoundaryDEBUG";
+    const parts = [
+      `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="to"\r\n\r\n${today}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="_token"\r\n\r\n${token}`,
+      `--${boundary}--`
+    ].join("\r\n");
+    await makeRequest("POST", "/portal/sms/received/getsms", parts,
+      `multipart/form-data; boundary=${boundary}`,
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01" }
+    ).catch(() => {});
+    const resp = await makeRequest("GET", "/portal/live/my_sms", null, null, {
+      "Referer":    `${BASE_URL}/portal/sms/received`,
+      "Accept":     "text/html, */*; q=0.01",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    });
+    res.set("Content-Type", "text/plain");
+    res.send(resp.body.substring(0, 3000));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Cookie update endpoint — POST with JSON body
 // { "xsrf": "...", "session": "..." }
 router.post("/update-session", express.json(), (req, res) => {
