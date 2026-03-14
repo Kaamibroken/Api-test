@@ -288,20 +288,22 @@ async function getSMS(token) {
     console.log(`[IVAS] ${range} → numbers: ${numbers.join(", ")}`);
 
     for (const number of numbers) {
-      // Step 3: Get actual OTP SMS for each number
-      const b3 = new URLSearchParams({ _token: token, start: today, end: today, Number: number, Range: range }).toString();
-      const r3  = await makeRequest(
-        "POST", "/portal/sms/received/getsms/number/sms", b3,
-        "application/x-www-form-urlencoded",
-        { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
-      ).catch(() => null);
-
-      if (!r3) continue;
-
-      // Parse OTP messages from HTML
-      console.log('[DEBUG r3]', JSON.stringify(r3.body.substring(0,500)));
+      const b3 = `_token=${encodeURIComponent(token)}&start=${today}&end=${today}&Number=${number}&Range=${encodeURIComponent(range)}`;
+      let r3;
+      try {
+        r3 = await makeRequest(
+          "POST", "/portal/sms/received/getsms/number/sms", b3,
+          "application/x-www-form-urlencoded",
+          { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+        );
+        console.log(`[IVAS r3] num=${number} status=${r3.status} len=${r3.body.length}`);
+        console.log(`[IVAS r3 body] ${r3.body.substring(0, 400)}`);
+      } catch(e) {
+        console.error(`[IVAS r3 FAIL] ${e.message}`);
+        continue;
+      }
       const msgs = parseSMSMessages(r3.body, range, number, today);
-      console.log('[DEBUG msgs]', JSON.stringify(msgs));
+      console.log(`[IVAS msgs] count=${msgs.length}`);
       allRows.push(...msgs);
     }
   }
