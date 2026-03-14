@@ -251,6 +251,151 @@ function fixNumbers(json) {
 async function getSMS(token) {
   const today    = getToday();
   const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
+  const ua       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
+
+  const parts = [
+    `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="to"\r\n\r\n${today}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="_token"\r\n\r\n${token}`,
+    `--${boundary}--`
+  ].join("\r\n");
+
+  // Step 1: Get ranges
+  const r1 = await makeRequest(
+    "POST", "/portal/sms/received/getsms", parts,
+    `multipart/form-data; boundary=${boundary}`,
+    { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+  );
+
+  const ranges = [...r1.body.matchAll(/toggleRange\('([^']+)'/g)].map(m => m[1]);
+  console.log(`[IVAS] Ranges: ${ranges.join(", ")}`);
+
+  const allRows = [];
+
+  for (const range of ranges) {
+    // Step 2: Get numbers per range
+    const b2 = new URLSearchParams({ _token: token, start: today, end: today, range }).toString();
+    const r2  = await makeRequest(
+      "POST", "/portal/sms/received/getsms/number", b2,
+      "application/x-www-form-urlencoded",
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+    ).catch(() => null);
+
+    if (!r2) continue;
+
+    // Extract numbers from HTML: toggleNum..('NUMBER','NUMBER_ID')
+    const numbers = [...r2.body.matchAll(/toggleNum[^(]+\('(\d+)'/g)].map(m => m[1]);
+    console.log(`[IVAS] ${range} → numbers: ${numbers.join(", ")}`);
+
+    for (const number of numbers) {
+      // Step 3: Get actual OTP SMS for each number
+      const b3 = new URLSearchParams({ _token: token, start: today, end: today, Number: number, Range: range }).toString();
+      const r3  = await makeRequest(
+        "POST", "/portal/sms/received/getsms/number/sms", b3,
+        "application/x-www-form-urlencoded",
+        { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+      ).catch(() => null);
+
+      if (!r3) continue;
+
+      // Parse OTP messages from HTML
+      const msgs = parseSMSMessages(r3.body, range, number, today);
+      allRows.push(...msgs);
+    }
+  }
+
+  return {
+    sEcho:                1,
+    iTotalRecords:        String(allRows.length),
+    iTotalDisplayRecords: String(allRows.length),
+    aaData:               allRows
+  };
+}
+
+function parseSMSMessages(html, range, number, date) {
+  const rows = [];
+  const clean = t => (t || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+
+  // Try table rows
+  const trPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
+  while ((trMatch = trPattern.exec(html)) !== null) {
+    const tds = [...trMatch[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => clean(m[1]));
+    if (tds.length >= 2) {
+      const msg = tds.find(t => t.length > 3 && !/^[\d.]+$/.test(t));
+      if (msg) {
+        rows.push([date + " 00:00:00", range, number, "SMS", msg, "$", 0]);
+      }
+    }
+  }
+
+  // Fallback: look for message divs
+  if (rows.length === 0) {
+    const divMsgs = [...html.matchAll(/class="[^"]*(?:msg|message|sms-text|body)[^"]*"[^>]*>([^<]+)</gi)];
+    divMsgs.forEach(m => {
+      const msg = clean(m[1]);
+      if (msg.length > 3) rows.push([date + " 00:00:00", range, number, "SMS", msg, "$", 0]);
+    });
+  }
+
+  // Last fallback: any meaningful text
+  if (rows.length === 0 && html.length > 50 && !html.includes("Failed to load")) {
+    const text = clean(html);
+    if (text.length > 5) rows.push([date + " 00:00:00", range, number, "SMS", text.substring(0, 200), "$", 0]);
+  }
+
+  return rows;
+}
+
+/* ================= GET NUMBERS ================= */
+async function getNumbers(token) {
+  const ts   = Date.now();
+  const path = `/portal/numbers?draw=1`
+    + `&columns[0][data]=number_id&columns[0][name]=id&columns[0][orderable]=false`
+    + `&columns[1][data]=Number`
+    + `&columns[2][data]=range`
+    + `&columns[3][data]=A2P`
+    + `&columns[4][data]=LimitA2P`
+    + `&columns[5][data]=limit_cli_a2p`
+    + `&columns[6][data]=limit_cli_did_a2p`
+    + `&columns[7][data]=action&columns[7][searchable]=false&columns[7][orderable]=false`
+    + `&order[0][column]=1&order[0][dir]=desc`
+    + `&start=0&length=5000&search[value]=&_=${ts}`;
+
+  const resp = await makeRequest("GET", path, null, null, {
+    "Referer":      `${BASE_URL}/portal/numbers`,
+    "Accept":       "application/json, text/javascript, */*; q=0.01",
+    "X-CSRF-TOKEN": token
+  });
+
+  const json = safeJSON(resp.body);
+  return fixNumbers(json);
+}
+
+function fixNumbers(json) {
+  if (!json || !json.data) return json;
+
+  // Format: [range, "", number, "Weekly", ""]
+  const aaData = json.data.map(row => [
+    row.range  || "",
+    "",
+    String(row.Number || ""),
+    "Weekly",
+    ""
+  ]);
+
+  return {
+    sEcho:              2,
+    iTotalRecords:      String(json.recordsTotal || aaData.length),
+    iTotalDisplayRecords: String(json.recordsFiltered || aaData.length),
+    aaData
+  };
+}
+
+/* ================= GET SMS ================= */
+async function getSMS(token) {
+  const today    = getToday();
+  const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
 
   const parts = [
     `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
@@ -399,11 +544,12 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Raw debug: show number-level HTML for first range
+// Raw debug: show actual OTP SMS HTML (level 3)
 router.get("/raw-sms", async (req, res) => {
   try {
     const token    = await fetchToken();
     const today    = getToday();
+    const ua       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
     const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
     const parts = [
       `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
@@ -411,25 +557,31 @@ router.get("/raw-sms", async (req, res) => {
       `--${boundary}\r\nContent-Disposition: form-data; name="_token"\r\n\r\n${token}`,
       `--${boundary}--`
     ].join("\r\n");
-    const r1 = await makeRequest(
-      "POST", "/portal/sms/received/getsms", parts,
+    // Level 1
+    const r1 = await makeRequest("POST", "/portal/sms/received/getsms", parts,
       `multipart/form-data; boundary=${boundary}`,
-      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
     );
-    // Get first range
     const rangeMatch = r1.body.match(/toggleRange\('([^']+)'/);
-    if (!rangeMatch) return res.send("No ranges found:\n" + r1.body.substring(0, 2000));
+    if (!rangeMatch) return res.send("No ranges:\n" + r1.body.substring(0,1000));
     const range = rangeMatch[1];
-    const body2 = new URLSearchParams({ _token: token, start: today, end: today, range }).toString();
-    const r2 = await makeRequest(
-      "POST", "/portal/sms/received/getsms/number", body2,
+    // Level 2
+    const r2 = await makeRequest("POST", "/portal/sms/received/getsms/number",
+      new URLSearchParams({ _token: token, start: today, end: today, range }).toString(),
       "application/x-www-form-urlencoded",
-      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+    );
+    const numMatch = r2.body.match(/toggleNum[^(]+\('(\d+)'/);
+    if (!numMatch) return res.send(`Range: ${range}\nNo numbers:\n` + r2.body.substring(0,1000));
+    const number = numMatch[1];
+    // Level 3
+    const r3 = await makeRequest("POST", "/portal/sms/received/getsms/number/sms",
+      new URLSearchParams({ _token: token, start: today, end: today, Number: number, Range: range }).toString(),
+      "application/x-www-form-urlencoded",
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
     );
     res.set("Content-Type", "text/plain");
-    res.send(`Range: ${range}\n\n` + r2.body.substring(0, 5000));
+    res.send(`Range: ${range}\nNumber: ${number}\n\n` + r3.body.substring(0, 5000));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
