@@ -249,9 +249,9 @@ function fixNumbers(json) {
 
 /* ================= GET SMS ================= */
 async function getSMS(token) {
-  // Step 1: POST to trigger SMS load
   const today    = getToday();
-  const boundary = "----WebKitFormBoundary" + Date.now().toString(16).toUpperCase();
+  const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
+
   const parts = [
     `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
     `--${boundary}\r\nContent-Disposition: form-data; name="to"\r\n\r\n${today}`,
@@ -259,18 +259,16 @@ async function getSMS(token) {
     `--${boundary}--`
   ].join("\r\n");
 
-  await makeRequest(
+  // Direct POST response mein SMS table hoti hai
+  const resp = await makeRequest(
     "POST", "/portal/sms/received/getsms", parts,
     `multipart/form-data; boundary=${boundary}`,
-    { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01" }
-  ).catch(() => {});
-
-  // Step 2: GET live SMS with numbers
-  const resp = await makeRequest("GET", "/portal/live/my_sms", null, null, {
-    "Referer":    `${BASE_URL}/portal/sms/received`,
-    "Accept":     "text/html, */*; q=0.01",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
-  });
+    {
+      "Referer":    `${BASE_URL}/portal/sms/received`,
+      "Accept":     "text/html, */*; q=0.01",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+    }
+  );
 
   return parseSMSHTML(resp.body);
 }
@@ -310,26 +308,26 @@ router.get("/", async (req, res) => {
 // Raw SMS HTML debug
 router.get("/raw-sms", async (req, res) => {
   try {
-    const token = await fetchToken();
+    const token    = await fetchToken();
     const today    = getToday();
-    const boundary = "----WebKitFormBoundaryDEBUG";
+    const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
     const parts = [
       `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
       `--${boundary}\r\nContent-Disposition: form-data; name="to"\r\n\r\n${today}`,
       `--${boundary}\r\nContent-Disposition: form-data; name="_token"\r\n\r\n${token}`,
       `--${boundary}--`
     ].join("\r\n");
-    await makeRequest("POST", "/portal/sms/received/getsms", parts,
+    const resp = await makeRequest(
+      "POST", "/portal/sms/received/getsms", parts,
       `multipart/form-data; boundary=${boundary}`,
-      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01" }
-    ).catch(() => {});
-    const resp = await makeRequest("GET", "/portal/live/my_sms", null, null, {
-      "Referer":    `${BASE_URL}/portal/sms/received`,
-      "Accept":     "text/html, */*; q=0.01",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    });
+      {
+        "Referer":    `${BASE_URL}/portal/sms/received`,
+        "Accept":     "text/html, */*; q=0.01",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+      }
+    );
     res.set("Content-Type", "text/plain");
-    res.send(resp.body.substring(0, 3000));
+    res.send(resp.body.substring(0, 5000));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
