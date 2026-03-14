@@ -315,27 +315,23 @@ async function getSMS(token) {
 function parseSMSMessages(html, range, number, date) {
   const rows = [];
 
-  // Decode HTML entities FIRST, then strip tags
   const decode = t => (t || "")
-    .replace(/&lt;/g, "\u00ab").replace(/&gt;/g, "\u00bb")  // temp replace < >
+    .replace(/&lt;[^&]*&gt;/g, "")   // remove <#> <anything> encoded tags
+    .replace(/&lt;/g, "").replace(/&gt;/g, "")
     .replace(/&amp;/g, "&").replace(/&#039;/g, "'").replace(/&quot;/g, '"')
-    .replace(/<[^>]+>/g, "")                                  // strip HTML tags
-    .replace(/\u00ab/g, "<").replace(/\u00bb/g, ">")         // restore < >
+    .replace(/<[^>]+>/g, "")
     .replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
 
-  // Extract senders
   const senderRe = /class="cli-tag"[^>]*>([^<]+)<\/span>/g;
   const senders  = [];
   let sm;
   while ((sm = senderRe.exec(html)) !== null) senders.push(sm[1].trim());
 
-  // Extract messages
   const msgRe = /class="msg-text"[^>]*>([\s\S]*?)<\/div>/g;
   const msgs  = [];
   let mm;
   while ((mm = msgRe.exec(html)) !== null) msgs.push(decode(mm[1]));
 
-  // Extract times
   const timeRe = /class="time-cell"[^>]*>\s*(\d{2}:\d{2}:\d{2})\s*</g;
   const times  = [];
   let tm;
