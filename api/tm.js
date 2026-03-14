@@ -282,10 +282,11 @@ async function getSMS(token) {
         "application/x-www-form-urlencoded",
         { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
       );
-      console.log(`[IVAS r2] status=${r2.status} len=${r2.body.length} preview=${r2.body.substring(0,200)}`);
+      console.log(`[IVAS r2] status=${r2.status} len=${r2.body.length} preview=${r2.body.substring(0,300)}`);
     } catch(e) {
-      console.error(`[IVAS r2 FAIL] ${e.message}`);
-      continue;
+      console.error(`[IVAS r2 FAIL] ${e.message} ${e.stack}`);
+      // Don't skip - try with empty body fallback
+      r2 = { status: 0, body: "" };
     }
 
     const numbers = [...r2.body.matchAll(/toggleNum[^(]+\('(\d+)'/g)].map(m => m[1]);
