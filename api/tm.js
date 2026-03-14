@@ -96,6 +96,10 @@ function makeRequest(method, path, body, contentType, extraHeaders = {}) {
       });
     });
 
+    // 15 second timeout
+    req.setTimeout(15000, () => {
+      req.destroy(new Error("Request timeout after 15s"));
+    });
     req.on("error", reject);
     if (body) req.write(body);
     req.end();
