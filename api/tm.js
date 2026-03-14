@@ -313,41 +313,42 @@ async function getSMS(token) {
 }
 
 function parseSMSMessages(html, range, number, date) {
-  const rows  = [];
-  const clean = t => (t || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&").replace(/&#039;/g,"'").trim();
+  const rows = [];
 
-  // Parse each <tr> in tbody
-  const trPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let trMatch;
-  while ((trMatch = trPattern.exec(html)) !== null) {
-    const row = trMatch[1];
-    if (row.includes("<th")) continue; // skip header
+  // Decode HTML entities
+  const decode = t => (t || "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&").replace(/&#039;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
 
-    // Sender: cli-tag span
-    const senderMatch = row.match(/class="cli-tag"[^>]*>([^<]+)</) ||
-                        row.match(/<td[^>]*>([\s\S]*?)<\/td>/);
-    const sender = senderMatch ? clean(senderMatch[1]) : "";
+  // Extract senders
+  const senderRe = /class="cli-tag"[^>]*>([^<]+)<\/span>/g;
+  const senders  = [];
+  let sm;
+  while ((sm = senderRe.exec(html)) !== null) senders.push(sm[1].trim());
 
-    // Message: msg-text div
-    const msgMatch = row.match(/class="msg-text"[^>]*>([\s\S]*?)<\/div>/);
-    const message  = msgMatch ? clean(msgMatch[1]) : "";
+  // Extract messages - between class="msg-text"> and </div>
+  const msgRe  = /class="msg-text"[^>]*>([\s\S]*?)<\/div>/g;
+  const msgs   = [];
+  let mm;
+  while ((mm = msgRe.exec(html)) !== null) msgs.push(decode(mm[1]));
 
-    // Time
-    const timeMatch = row.match(/class="time-cell"[^>]*>([^<]+)</);
-    const time      = timeMatch ? timeMatch[1].trim() : "00:00:00";
+  // Extract times
+  const timeRe = /class="time-cell"[^>]*>\s*(\d{2}:\d{2}:\d{2})\s*</g;
+  const times  = [];
+  let tm;
+  while ((tm = timeRe.exec(html)) !== null) times.push(tm[1]);
 
-    if (message) {
-      rows.push([
-        `${date} ${time}`,  // datetime
-        range,               // range
-        number,              // number
-        sender || "SMS",     // sender/service
-        message,             // OTP message
-        "$",
-        0
-      ]);
-    }
-  }
+  msgs.forEach((msg, i) => {
+    if (!msg) return;
+    rows.push([
+      `${date} ${times[i] || "00:00:00"}`,
+      range, number,
+      senders[i] || "SMS",
+      msg, "$", 0
+    ]);
+  });
 
   return rows;
 }
