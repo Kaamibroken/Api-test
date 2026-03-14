@@ -112,6 +112,96 @@ async function fetchToken() {
   return match ? match[1] : null;
 }
 
+/* ================= PARSE HTML HELPERS ================= */
+function stripHTML(html) {
+  return (html || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
+function parseNumbersHTML(html) {
+  const results = [];
+  // Extract range names
+  const rangeMatches = html.matchAll(/toggleRange\(['"](.*?)['"]\s*,\s*['"](.*?)['"]/g);
+  const ranges = {};
+  for (const m of rangeMatches) {
+    ranges[m[2]] = m[1]; // id -> name
+  }
+
+  // Extract numbers under each range
+  const numberMatches = html.matchAll(/data-number="([^"]+)"[^>]*data-range="([^"]+)"|class="num[^"]*"[^>]*>([^<]+)<\/|<td[^>]*>([0-9]{6,15})<\/td>/g);
+
+  // Simple: extract all phone numbers (6-15 digits)
+  const phonePattern = /(\d{7,15})/g;
+  const rangePattern = /toggleRange\(['"]([^'"]+)['"]/g;
+
+  let rangeNames = [];
+  let rm;
+  while ((rm = rangePattern.exec(html)) !== null) {
+    rangeNames.push(rm[1]);
+  }
+
+  // Get number rows - look for number containers
+  const rowPattern = /class="num(?:ber)?[^"]*"[^>]*>([\s\S]*?)<\/(?:div|td|tr)/g;
+  let rowMatch;
+  let idx = 0;
+  while ((rowMatch = rowPattern.exec(html)) !== null) {
+    const text = stripHTML(rowMatch[1]);
+    const nums = text.match(/\d{7,15}/g);
+    if (nums) {
+      nums.forEach(n => {
+        results.push({
+          number: n,
+          range:  rangeNames[idx] || "",
+          status: "Active"
+        });
+      });
+      idx++;
+    }
+  }
+
+  // Fallback: just extract all numbers from HTML
+  if (results.length === 0) {
+    const allNums = html.match(/\d{9,15}/g) || [];
+    const unique  = [...new Set(allNums)];
+    unique.forEach(n => results.push({ number: n, range: "", status: "Active" }));
+  }
+
+  return { total: results.length, aaData: results };
+}
+
+function parseSMSHTML(html) {
+  const results = [];
+
+  // Try JSON first
+  try {
+    const json = JSON.parse(html);
+    if (json.data || json.aaData || Array.isArray(json)) return json;
+  } catch {}
+
+  // Parse HTML table rows
+  const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+  while ((rowMatch = rowPattern.exec(html)) !== null) {
+    const row  = rowMatch[1];
+    const cols = [];
+    const tdPattern = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    let tdMatch;
+    while ((tdMatch = tdPattern.exec(row)) !== null) {
+      cols.push(stripHTML(tdMatch[1]));
+    }
+    if (cols.length >= 3) {
+      results.push({
+        date:    cols[0] || "",
+        number:  cols[1] || "",
+        message: cols[2] || "",
+        status:  cols[3] || "",
+        raw:     cols
+      });
+    }
+  }
+
+  return { total: results.length, aaData: results, rawPreview: results.length === 0 ? html.substring(0, 500) : undefined };
+}
+
 /* ================= GET NUMBERS ================= */
 async function getNumbers(token) {
   const ts   = Date.now();
@@ -125,14 +215,36 @@ async function getNumbers(token) {
     + `&columns[6][data]=limit_cli_did_a2p`
     + `&columns[7][data]=action&columns[7][searchable]=false&columns[7][orderable]=false`
     + `&order[0][column]=1&order[0][dir]=desc`
-    + `&start=0&length=1000&search[value]=&_=${ts}`;
+    + `&start=0&length=5000&search[value]=&_=${ts}`;
 
   const resp = await makeRequest("GET", path, null, null, {
     "Referer":      `${BASE_URL}/portal/numbers`,
     "Accept":       "application/json, text/javascript, */*; q=0.01",
     "X-CSRF-TOKEN": token
   });
-  return safeJSON(resp.body);
+
+  const json = safeJSON(resp.body);
+  return fixNumbers(json);
+}
+
+function fixNumbers(json) {
+  if (!json || !json.data) return json;
+
+  // Format: [range, "", number, "Weekly", ""]
+  const aaData = json.data.map(row => [
+    row.range  || "",
+    "",
+    String(row.Number || ""),
+    "Weekly",
+    ""
+  ]);
+
+  return {
+    sEcho:              2,
+    iTotalRecords:      String(json.recordsTotal || aaData.length),
+    iTotalDisplayRecords: String(json.recordsFiltered || aaData.length),
+    aaData
+  };
 }
 
 /* ================= GET SMS ================= */
@@ -155,7 +267,8 @@ async function getSMS(token) {
       "Accept":  "text/html, */*; q=0.01"
     }
   );
-  return safeJSON(resp.body);
+
+  return parseSMSHTML(resp.body);
 }
 
 /* ================= ROUTES ================= */
