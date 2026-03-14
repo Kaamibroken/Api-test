@@ -53,7 +53,6 @@ async function puppeteerLogin() {
 
   const browser = await puppeteer.launch({
     headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -70,18 +69,23 @@ async function puppeteerLogin() {
     await page.setUserAgent(USER_AGENT);
     await page.setViewport({ width: 390, height: 844, isMobile: true });
 
+    // Step 1: Open login page — Cloudflare Turnstile auto-solves
     console.log("📄 [IVAS] Opening login page...");
-    await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto(`${BASE_URL}/login`, {
+      waitUntil: "networkidle2",
+      timeout:   30000
+    });
 
-    // Wait for Cloudflare Turnstile to auto-solve
-    console.log("⏳ [IVAS] Waiting for Turnstile...");
+    // Wait for Turnstile to auto-complete
+    console.log("⏳ [IVAS] Waiting for Turnstile auto-solve...");
     await page.waitForFunction(() => {
       const el = document.querySelector('[name="cf-turnstile-response"]');
       return el && el.value && el.value.length > 10;
     }, { timeout: 20000 }).catch(() => {
-      console.warn("⚠️ [IVAS] Turnstile timeout — proceeding anyway");
+      console.warn("⚠️ [IVAS] Turnstile wait timeout — proceeding anyway");
     });
 
+    // Step 2: Fill credentials
     console.log("✏️ [IVAS] Filling form...");
     await page.evaluate((email, pass) => {
       document.querySelector('input[name="email"]').value    = email;
@@ -90,32 +94,36 @@ async function puppeteerLogin() {
       if (rem) rem.checked = true;
     }, EMAIL, PASSWORD);
 
-    console.log("🚀 [IVAS] Submitting...");
+    // Step 3: Submit
+    console.log("🚀 [IVAS] Submitting form...");
     await Promise.all([
       page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }),
       page.click('button[type="submit"]')
     ]);
 
     const currentUrl = page.url();
-    console.log("📍 [IVAS] Landed:", currentUrl);
+    console.log("📍 [IVAS] Landed on:", currentUrl);
 
     if (currentUrl.includes("/login")) {
       throw new Error("Login failed — wrong credentials or Turnstile blocked");
     }
 
+    // Step 4: Save cookies
     const pageCookies = await page.cookies();
     STATE.cookies = {};
     pageCookies.forEach(c => { STATE.cookies[c.name] = c.value; });
     console.log("🍪 [IVAS] Cookies:", Object.keys(STATE.cookies).join(", "));
 
+    // Step 5: Get _token from portal
     await page.goto(`${BASE_URL}/portal`, { waitUntil: "networkidle2", timeout: 20000 });
-    const html  = await page.content();
-    const match = html.match(/name="_token"\s+value="([^"]+)"/) ||
-                  html.match(/content="([^"]+)"\s+name="csrf-token"/);
-    STATE.token     = match ? match[1] : null;
-    STATE.lastLogin = Date.now();
 
-    console.log(`✅ [IVAS] Login OK! Token: ${STATE.token ? STATE.token.substring(0,15)+"..." : "NOT FOUND"}`);
+    const html = await page.content();
+    const match = html.match(/name="_token"\s+value="([^"]+)"/) ||
+                  html.match(/"csrf-token"\s+content="([^"]+)"/);
+    STATE.token = match ? match[1] : null;
+
+    STATE.lastLogin = Date.now();
+    console.log(`✅ [IVAS] Login done! Token: ${STATE.token ? STATE.token.substring(0,15)+"..." : "NOT FOUND"}`);
 
   } finally {
     await browser.close();
@@ -132,7 +140,7 @@ function performLogin() {
 function isSessionValid() {
   if (!STATE.token || !STATE.cookies["ivas_sms_session"]) return false;
   if (!STATE.lastLogin) return false;
-  return (Date.now() - STATE.lastLogin) < 90 * 60 * 1000;
+  return (Date.now() - STATE.lastLogin) < 90 * 60 * 1000; // 90 min
 }
 
 /* ================= HTTP REQUEST ================= */
@@ -159,8 +167,9 @@ function makeRequest(method, path, body, contentType, extraHeaders = {}) {
     const req = https.request(BASE_URL + path, { method, headers }, res => {
       if (res.headers["set-cookie"]) {
         res.headers["set-cookie"].forEach(c => {
-          const sc = c.split(";")[0];
-          const ki = sc.indexOf("=");
+          const idx = c.indexOf("=");
+          const sc  = c.split(";")[0];
+          const ki  = sc.indexOf("=");
           if (ki > -1) {
             const k = sc.substring(0, ki).trim();
             const v = sc.substring(ki + 1).trim();
@@ -196,12 +205,24 @@ function makeRequest(method, path, body, contentType, extraHeaders = {}) {
 
 /* ================= GET NUMBERS ================= */
 async function getNumbers() {
-  const body = `termination_id=${TERMINATION_ID}&_token=${STATE.token}`;
-  const resp = await makeRequest(
-    "POST", "/portal/live/getNumbers", body,
-    "application/x-www-form-urlencoded; charset=UTF-8",
-    { "Referer": `${BASE_URL}/portal/live/my_sms` }
-  );
+  const ts   = Date.now();
+  const path = `/portal/numbers?draw=1`
+    + `&columns[0][data]=number_id&columns[0][name]=id&columns[0][orderable]=false`
+    + `&columns[1][data]=Number`
+    + `&columns[2][data]=range`
+    + `&columns[3][data]=A2P`
+    + `&columns[4][data]=LimitA2P`
+    + `&columns[5][data]=limit_cli_a2p`
+    + `&columns[6][data]=limit_cli_did_a2p`
+    + `&columns[7][data]=action&columns[7][searchable]=false&columns[7][orderable]=false`
+    + `&order[0][column]=1&order[0][dir]=desc`
+    + `&start=0&length=1000&search[value]=&_=${ts}`;
+
+  const resp = await makeRequest("GET", path, null, null, {
+    "Referer":      `${BASE_URL}/portal/numbers`,
+    "Accept":       "application/json, text/javascript, */*; q=0.01",
+    "X-CSRF-TOKEN": STATE.token
+  });
   return safeJSON(resp.body);
 }
 
