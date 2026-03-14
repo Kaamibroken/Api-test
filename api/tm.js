@@ -42,32 +42,40 @@ function safeJSON(text) {
 
 /* ================= PUPPETEER LOGIN ================= */
 async function puppeteerLogin() {
-  let puppeteer;
+  let puppeteer, StealthPlugin;
   try {
-    puppeteer = require("puppeteer");
+    puppeteer    = require("puppeteer-extra");
+    StealthPlugin = require("puppeteer-extra-plugin-stealth");
+    puppeteer.use(StealthPlugin());
   } catch {
-    throw new Error("puppeteer not installed. Run: npm install puppeteer");
+    throw new Error("Run: npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer");
   }
 
-  console.log("🌐 [IVAS] Launching browser...");
+  console.log("🌐 [IVAS] Launching stealth browser...");
 
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: true,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
       "--no-first-run",
-      "--no-zygote",
-      "--single-process"
+      "--window-size=1280,800",
+      "--disable-blink-features=AutomationControlled"
     ]
   });
 
   try {
     const page = await browser.newPage();
-    await page.setUserAgent(USER_AGENT);
-    await page.setViewport({ width: 390, height: 844, isMobile: true });
+    // Desktop mode — less bot detection
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    await page.setViewport({ width: 1280, height: 800, isMobile: false });
+    // Remove webdriver flag
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
+    });
 
     // Step 1: Open login page — Cloudflare Turnstile auto-solves
     console.log("📄 [IVAS] Opening login page...");
