@@ -313,35 +313,40 @@ async function getSMS(token) {
 }
 
 function parseSMSMessages(html, range, number, date) {
-  const rows = [];
-  const clean = t => (t || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  const rows  = [];
+  const clean = t => (t || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&").replace(/&#039;/g,"'").trim();
 
-  // Try table rows
+  // Parse each <tr> in tbody
   const trPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let trMatch;
   while ((trMatch = trPattern.exec(html)) !== null) {
-    const tds = [...trMatch[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => clean(m[1]));
-    if (tds.length >= 2) {
-      const msg = tds.find(t => t.length > 3 && !/^[\d.]+$/.test(t));
-      if (msg) {
-        rows.push([date + " 00:00:00", range, number, "SMS", msg, "$", 0]);
-      }
+    const row = trMatch[1];
+    if (row.includes("<th")) continue; // skip header
+
+    // Sender: cli-tag span
+    const senderMatch = row.match(/class="cli-tag"[^>]*>([^<]+)</) ||
+                        row.match(/<td[^>]*>([\s\S]*?)<\/td>/);
+    const sender = senderMatch ? clean(senderMatch[1]) : "";
+
+    // Message: msg-text div
+    const msgMatch = row.match(/class="msg-text"[^>]*>([\s\S]*?)<\/div>/);
+    const message  = msgMatch ? clean(msgMatch[1]) : "";
+
+    // Time
+    const timeMatch = row.match(/class="time-cell"[^>]*>([^<]+)</);
+    const time      = timeMatch ? timeMatch[1].trim() : "00:00:00";
+
+    if (message) {
+      rows.push([
+        `${date} ${time}`,  // datetime
+        range,               // range
+        number,              // number
+        sender || "SMS",     // sender/service
+        message,             // OTP message
+        "$",
+        0
+      ]);
     }
-  }
-
-  // Fallback: look for message divs
-  if (rows.length === 0) {
-    const divMsgs = [...html.matchAll(/class="[^"]*(?:msg|message|sms-text|body)[^"]*"[^>]*>([^<]+)</gi)];
-    divMsgs.forEach(m => {
-      const msg = clean(m[1]);
-      if (msg.length > 3) rows.push([date + " 00:00:00", range, number, "SMS", msg, "$", 0]);
-    });
-  }
-
-  // Last fallback: any meaningful text
-  if (rows.length === 0 && html.length > 50 && !html.includes("Failed to load")) {
-    const text = clean(html);
-    if (text.length > 5) rows.push([date + " 00:00:00", range, number, "SMS", text.substring(0, 200), "$", 0]);
   }
 
   return rows;
