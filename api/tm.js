@@ -37,6 +37,14 @@ function safeJSON(text) {
   catch { return { error: "Invalid JSON", preview: text.substring(0, 300) }; }
 }
 
+/* ================= TIMEOUT HELPER ================= */
+function withTimeout(promise, ms, label) {
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`TIMEOUT ${ms}ms: ${label}`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+}
+
 /* ================= HTTP REQUEST ================= */
 function makeRequest(method, path, body, contentType, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
@@ -281,15 +289,14 @@ async function getSMS(token) {
     const b2 = `_token=${encodeURIComponent(token)}&start=${today}&end=${today}&range=${encodeURIComponent(range)}`;
     let r2;
     try {
-      r2 = await makeRequest(
+      r2 = await withTimeout(makeRequest(
         "POST", "/portal/sms/received/getsms/number", b2,
         "application/x-www-form-urlencoded",
         { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
-      );
+      ), 10000, "r2");
       console.log(`[IVAS r2] status=${r2.status} len=${r2.body.length} preview=${r2.body.substring(0,300)}`);
     } catch(e) {
-      console.error(`[IVAS r2 FAIL] ${e.message} ${e.stack}`);
-      // Don't skip - try with empty body fallback
+      console.error(`[IVAS r2 FAIL] ${e.message}`);
       r2 = { status: 0, body: "" };
     }
 
@@ -300,11 +307,11 @@ async function getSMS(token) {
       const b3 = `_token=${encodeURIComponent(token)}&start=${today}&end=${today}&Number=${number}&Range=${encodeURIComponent(range)}`;
       let r3;
       try {
-        r3 = await makeRequest(
+        r3 = await withTimeout(makeRequest(
           "POST", "/portal/sms/received/getsms/number/sms", b3,
           "application/x-www-form-urlencoded",
           { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
-        );
+        ), 10000, "r3");
         console.log(`[IVAS r3] num=${number} status=${r3.status} len=${r3.body.length}`);
         console.log(`[IVAS r3 body] ${r3.body.substring(0, 400)}`);
       } catch(e) {
