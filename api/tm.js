@@ -12,7 +12,8 @@ const USER_AGENT     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 /* ================= COOKIES (Update when expired) ================= */
 // Jab expire ho: browser me login karo → DevTools → Network → koi bhi request
 // → Request Headers → Cookie se XSRF-TOKEN aur ivas_sms_session copy karo
-let TOKEN_CACHE = { value: null, time: 0 };
+let TOKEN_CACHE   = { value: null, time: 0 };
+let SMS_CACHE     = { data: null, time: 0 };
 let COOKIES = {
   "XSRF-TOKEN":       "eyJpdiI6Imszazf0VEZPd0RlVFVpTityeGlwWmc9PSIsInZhbHVlIjoiNUY1YldvbnNHa3dlSmRnT2t1TDNoMVArTjZqT2UwLzJZZFA3MnB3SHUwOUl2Q05pYjlEd3cydGJTOTJBb1hsL1QvL3lJT05GTXJqb3RadEhHQVh6UWc5azJ6bTdNS2N0NGtOQ3oyQXU3V1FvYTFHL2lPaS9FYnROQkhoV1ZRL0UiLCJtYWMiOiJmYTg0MjI1MjY4MGU4YmY1ZTdhMmUzODIwMGI1ZmM1NTYxMmMyMzE1ZWZmMjkxYTI2Yzc4YmJhZWVlZmRjNmE3IiwidGFnIjoiIn0%3D",
   "ivas_sms_session": "eyJpdiI6InBueWx0SE1BNXJEZjlRL3hja3p1cHc9PSIsInZhbHVlIjoiS1dQWHk2QWd0V1dTUm93Y2RLWE8rOTJML1kweUtmZENCdzRZOEhoQVNyOXhGSEFNWmlZUTZ1ZFlMMkwzWjZxdWg2K2xUZW13L3F5ZEVVSThaY0duQmlRUGtvcEZGNURJVDMyT3YxK05KY0NCQUZpNDh2ZUJIa3Iwa0xIZXdzSlciLCJtYWMiOiIyZTFkMjc1ZmE1ZmRkZjg3NzE0ZjcyYWMwMGJjNGMwOWYzZjBhNmM1ODA2OTljMDM3YjM5ZjQwZDI4ZWE1YjQ1IiwidGFnIjoiIn0%3D"
@@ -270,6 +271,10 @@ function fixNumbers(json) {
 
 /* ================= GET SMS ================= */
 async function getSMS(token) {
+  // Cache SMS for 30 seconds
+  if (SMS_CACHE.data && (Date.now() - SMS_CACHE.time) < 30000) {
+    return SMS_CACHE.data;
+  }
   const today    = getToday();
   const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
   const ua       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
@@ -322,12 +327,15 @@ async function getSMS(token) {
 
   const allRows = rangeResults.flat();
 
-  return {
+  const result = {
     sEcho:                1,
     iTotalRecords:        String(allRows.length),
     iTotalDisplayRecords: String(allRows.length),
     aaData:               allRows
   };
+  SMS_CACHE.data = result;
+  SMS_CACHE.time = Date.now();
+  return result;
 }
 
 function parseSMSMessages(html, range, number, date) {
@@ -502,6 +510,7 @@ router.post("/update-session", express.json(), (req, res) => {
   COOKIES["XSRF-TOKEN"]       = xsrf;
   COOKIES["ivas_sms_session"] = session;
   TOKEN_CACHE.value = null; // reset token cache
+  SMS_CACHE.data    = null; // reset SMS cache
   res.json({ success: true, message: "Cookies updated!" });
 });
 
